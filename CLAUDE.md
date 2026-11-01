@@ -26,8 +26,13 @@ The goal is one trusted answer for every number, and a clear record of which sys
      whose operation is a **query**; the HTTP layer rejects mutations and subscriptions, with tests.
      Token scopes: `read_products`, `read_inventory`, `read_orders` only — checked at startup; a token
      with any `write_*` scope is rejected.
-   - ERPNext: only `GET` requests, enforced in the HTTP layer. The API user has a dedicated read-only role
+   - ERPNext: only `GET` requests on `/api/resource/...`, enforced in the HTTP layer. `/api/method/...`
+     only for an explicit allowlist of read-only methods (Frappe whitelisted methods can write), and never
+     the `run_method`/`cmd` parameters (Frappe runs a document method for
+     `GET /api/resource/<doctype>/<name>?run_method=...`). The API user has a dedicated read-only role
      (see `docs/erpnext-readonly-user.md`).
+   - The guards live in `sources/http.py` as an httpx transport, so no client code can bypass them.
+     Requests go only to the configured host; redirects are never followed.
    - Never create or modify records in either system — not even test data or a missing custom field.
      Test data is created by hand, outside this tool. This holds during testing too: no write
      requests, not even ones expected to fail.
@@ -61,6 +66,7 @@ src/reconciler/
   config.py          # settings from environment variables
   models.py          # input records from each system + Discrepancy, ReconciliationResult (pydantic)
   sources/
+    http.py          # read-only guards, retries, throttling, pagination, Decimal JSON
     shopify.py       # read-only Shopify Admin API client
     erpnext.py       # read-only ERPNext REST client
   reconcile.py       # comparison rules -> list[Discrepancy]  (pure functions, no network)
@@ -71,7 +77,7 @@ tests/
   fixtures/          # fake JSON API responses from both systems (client tests)
   builders.py        # generated in-memory test records (all values fake)
   test_models.py, test_reconcile.py, test_reconcile_end_to_end.py,
-  test_report.py, test_config.py, test_sources.py
+  test_report.py, test_config.py, test_http.py, test_sources.py
 docs/
   architecture.md
   data-dictionary.md # what every field means and which system owns it
