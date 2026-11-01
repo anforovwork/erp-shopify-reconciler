@@ -109,6 +109,10 @@ class ErpData(_Record):
     items: tuple[ErpItem, ...]
     prices: tuple[ErpItemPrice, ...]
     bins: tuple[ErpBin, ...]
+    warehouse_confirmed: bool
+    """The client looked up the configured warehouse and it exists."""
+    bins_complete: bool
+    """Every Bin page for the warehouse was retrieved without error."""
     sales_orders: tuple[ErpSalesOrder, ...] | None
     """None = order mapping field unavailable; the order check is skipped."""
 

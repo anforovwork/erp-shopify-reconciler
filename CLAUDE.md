@@ -113,7 +113,10 @@ price checks still run).
 
 **Stock.** Shopify `on_hand` at one configured location (`SHOPIFY_LOCATION_ID`) vs ERPNext Bin
 `actual_qty` in one configured warehouse (`ERPNEXT_WAREHOUSE`). No Bin row means 0 (ERPNext creates a Bin
-only on the first stock transaction). Any difference is a mismatch. Skipped, with a reason: variants
+only on the first stock transaction) — **but only** when the client confirmed the warehouse exists and
+retrieved every Bin page (`ErpData.warehouse_confirmed` and `bins_complete`); otherwise that SKU's stock
+check is skipped. A failed or incomplete API response is never read as zero: the client raises instead
+of returning partial data. Any difference is a mismatch. Skipped, with a reason: variants
 whose inventory is not tracked, variants not stocked at the location, items whose stock UOM is not in
 `ERPNEXT_UNIT_UOMS`, fractional `actual_qty`. Sellable/reserved quantities are out of scope for v1.
 

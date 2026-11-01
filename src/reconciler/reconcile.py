@@ -377,15 +377,34 @@ def _price_finding(
 # --- Stock ---------------------------------------------------------------------------------
 
 
+NO_BIN_UNCONFIRMED = (
+    "No ERPNext Bin row, and the warehouse or the Bin data was not confirmed complete; "
+    "not assuming zero stock."
+)
+
+
 def check_stock(
-    matched: dict[str, MatchedProduct], bins: Iterable[ErpBin], options: ReconcileOptions
+    matched: dict[str, MatchedProduct],
+    bins: Iterable[ErpBin],
+    options: ReconcileOptions,
+    *,
+    bins_trustworthy: bool,
 ) -> Findings:
-    """Shopify on_hand at the configured location vs ERPNext Bin actual_qty in the warehouse."""
+    """Shopify on_hand at the configured location vs ERPNext Bin actual_qty in the warehouse.
+
+    A missing Bin row means zero (ERPNext creates a Bin on the first stock transaction), but only
+    when `bins_trustworthy`: the warehouse exists and every Bin page was retrieved.
+    """
     erp_qty = {b.item_code: b.actual_qty for b in bins if b.warehouse == options.warehouse}
     findings = Findings()
     for sku, product in matched.items():
-        # No Bin row means no stock transaction yet, i.e. zero.
-        qty = erp_qty.get(product.item.item_code, Decimal(0))
+        qty = erp_qty.get(product.item.item_code)
+        if qty is None and not bins_trustworthy:
+            findings.skipped.append(
+                SkippedCheck(check=CheckName.STOCK, key=sku, reason=NO_BIN_UNCONFIRMED)
+            )
+            continue
+        qty = Decimal(0) if qty is None else qty
         reason = _stock_skip_reason(product, qty, options)
         if reason:
             findings.skipped.append(SkippedCheck(check=CheckName.STOCK, key=sku, reason=reason))
@@ -501,7 +520,14 @@ def reconcile(
         check_missing(shopify_index, erp_index, out_of_scope_reasons(erp.items, options))
     )
     findings.extend(check_prices(matched, erp.prices, shopify.shop, options))
-    findings.extend(check_stock(matched, erp.bins, options))
+    findings.extend(
+        check_stock(
+            matched,
+            erp.bins,
+            options,
+            bins_trustworthy=erp.warehouse_confirmed and erp.bins_complete,
+        )
+    )
     findings.extend(check_orders(shopify.orders, erp.sales_orders, options))
 
     return ReconciliationResult(

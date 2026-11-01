@@ -363,10 +363,16 @@ def test_currency_mismatch_is_a_configuration_error(shop: str, price_list: str) 
 # --- Stock ---------------------------------------------------------------------------------
 
 
-def _stock_findings(erp_bins: list, erp_item: ErpItem | None = None, **variant_fields: object):
+def _stock_findings(
+    erp_bins: list,
+    erp_item: ErpItem | None = None,
+    bins_trustworthy: bool = True,
+    **variant_fields: object,
+):
     shopify = index_shopify_variants([variant("SKU-1", **variant_fields)])
     erp = index_erp_items([erp_item or item("SKU-1")], options())
-    return check_stock(match_products(shopify, erp), erp_bins, options())
+    matched = match_products(shopify, erp)
+    return check_stock(matched, erp_bins, options(), bins_trustworthy=bins_trustworthy)
 
 
 def test_equal_stock_matches() -> None:
@@ -395,6 +401,21 @@ def test_whole_erp_quantity_with_decimals_is_not_fractional() -> None:
 def test_missing_bin_means_zero_stock() -> None:
     assert _stock_findings([], on_hand=0).discrepancies == []
     assert [d.erp_value for d in _stock_findings([], on_hand=2).discrepancies] == [Decimal(0)]
+
+
+def test_missing_bin_is_not_zero_when_bin_data_is_unconfirmed() -> None:
+    findings = _stock_findings([], bins_trustworthy=False, on_hand=2)
+
+    assert findings.discrepancies == []
+    [skipped] = findings.skipped
+    assert (skipped.check, skipped.key) == (CheckName.STOCK, "SKU-1")
+    assert "not assuming zero" in skipped.reason
+
+
+def test_existing_bin_is_still_compared_when_bin_data_is_unconfirmed() -> None:
+    findings = _stock_findings([stock_bin("SKU-1", "3")], bins_trustworthy=False, on_hand=5)
+
+    assert [d.type for d in findings.discrepancies] == [DiscrepancyType.STOCK_MISMATCH]
 
 
 def test_bins_in_other_warehouses_are_ignored() -> None:
