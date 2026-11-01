@@ -5,15 +5,14 @@ Safety is enforced in an httpx *transport*, so no client code path can bypass it
 * ERPNext: only `GET` on `/api/resource/...` (plus an explicit allowlist of read-only
   `/api/method/...` calls), never with `run_method` or `cmd` parameters — Frappe executes a
   document method for `GET /api/resource/<doctype>/<name>?run_method=...`.
-* Shopify: only `POST` to the configured `/admin/api/<version>/graphql.json`, and the GraphQL
-  document may contain only queries (and fragments); mutations and subscriptions are rejected.
+* Shopify: only `POST` of a strict JSON body to the configured `/admin/api/<version>/graphql.json`,
+  whose GraphQL document (parsed by graphql-core) is exactly one query plus fragments.
 
 Requests go only to the configured host, redirects are never followed, and error messages
 contain the method, path and status code — never headers, tokens or response bodies.
 """
 
 import json
-import re
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -21,6 +20,8 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+from graphql import GraphQLError, OperationType, parse
+from graphql.language import FragmentDefinitionNode, OperationDefinitionNode
 from pydantic import SecretStr
 
 # --- Errors --------------------------------------------------------------------------------
@@ -72,15 +73,49 @@ def shopify_policy(host: str, api_version: str) -> Policy:
         _check_host(request, host)
         if request.method != "POST" or request.url.path != graphql_path:
             raise ReadOnlyViolation("Shopify: only POST to the GraphQL Admin endpoint is allowed")
-        try:
-            body = json.loads(request.content)
-        except ValueError:
-            raise ReadOnlyViolation("Shopify: request body is not JSON") from None
-        if not isinstance(body, dict) or not isinstance(body.get("query"), str):
+        if request.url.query:
+            raise ReadOnlyViolation("Shopify: URL parameters are not allowed")
+        content_type = request.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise ReadOnlyViolation("Shopify: request body must be application/json")
+        body = _strict_json_object(request.content)
+        if not set(body) <= _GRAPHQL_BODY_KEYS:
+            raise ReadOnlyViolation("Shopify: unexpected keys in the GraphQL request body")
+        variables = body.get("variables")
+        operation_name = body.get("operationName")
+        if not isinstance(body.get("query"), str):
             raise ReadOnlyViolation("Shopify: request body has no GraphQL query")
-        ensure_query_only(body["query"])
+        if variables is not None and not isinstance(variables, dict):
+            raise ReadOnlyViolation("Shopify: GraphQL variables must be an object")
+        if operation_name is not None and not isinstance(operation_name, str):
+            raise ReadOnlyViolation("Shopify: operationName must be a string")
+        ensure_query_only(body["query"], operation_name)
 
     return check
+
+
+# Persisted-query hashes ("extensions") or anything else could make the server run a document
+# we never inspected, so only these keys are accepted.
+_GRAPHQL_BODY_KEYS = frozenset({"query", "variables", "operationName"})
+
+
+def _strict_json_object(content: bytes) -> dict[str, Any]:
+    """Parse a JSON object, rejecting duplicate keys: a server that keeps the *first* `query`
+    while we inspect the *last* one would otherwise run a document we never checked."""
+
+    def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        keys = [key for key, _ in pairs]
+        if len(keys) != len(set(keys)):
+            raise ReadOnlyViolation("Shopify: duplicate keys in the JSON body")
+        return dict(pairs)
+
+    try:
+        body = json.loads(content, object_pairs_hook=no_duplicates)
+    except ValueError:
+        raise ReadOnlyViolation("Shopify: request body is not JSON") from None
+    if not isinstance(body, dict):
+        raise ReadOnlyViolation("Shopify: request body is not a JSON object")
+    return body
 
 
 def _check_host(request: httpx.Request, host: str) -> None:
@@ -88,38 +123,37 @@ def _check_host(request: httpx.Request, host: str) -> None:
         raise ReadOnlyViolation("Request to an unexpected host")
 
 
-_GRAPHQL_IGNORED = re.compile(r'"""[\s\S]*?"""|"(?:\\.|[^"\\\n])*"|#[^\n]*')
-_GRAPHQL_TOKEN = re.compile(r"[_A-Za-z][_0-9A-Za-z]*|[{}]")
+MAX_GRAPHQL_CHARS = 20_000
+MAX_GRAPHQL_TOKENS = 2_000
 
 
-def ensure_query_only(document: str) -> None:
-    """Every top-level definition must be a query, an anonymous `{ ... }` query or a fragment.
+def ensure_query_only(document: str, operation_name: str | None = None) -> None:
+    """Allow exactly one `query` operation plus fragments, parsed by graphql-core.
 
-    Strings and comments are removed first, so text like "mutation" inside them is harmless,
-    and field names inside selections are never top-level, so a field called `mutation` is fine.
+    Rejected: invalid syntax, mutations, subscriptions, more than one operation (even if all are
+    queries), schema/type-system definitions, oversized documents, and an operationName that
+    does not name the operation. The parser's error text (which quotes the document) is dropped.
     """
-    words = _GRAPHQL_TOKEN.findall(_GRAPHQL_IGNORED.sub(" ", document))
-    depth = 0
-    expect_definition = True
-    seen_definition = False
-    for word in words:
-        if word == "{":
-            if depth == 0 and expect_definition:  # anonymous query shorthand
-                seen_definition = True
-            depth += 1
-            expect_definition = False
-        elif word == "}":
-            depth -= 1
-            if depth < 0:
-                raise ReadOnlyViolation("GraphQL document has unbalanced braces")
-            expect_definition = depth == 0
-        elif depth == 0 and expect_definition:
-            if word not in ("query", "fragment"):
-                raise ReadOnlyViolation("GraphQL operation must be a query (no mutations)")
-            seen_definition = True
-            expect_definition = False
-    if depth != 0 or not seen_definition:
-        raise ReadOnlyViolation("GraphQL document is incomplete")
+    if not isinstance(document, str) or len(document) > MAX_GRAPHQL_CHARS:
+        raise ReadOnlyViolation("GraphQL document is missing or too large")
+    try:
+        ast = parse(document, no_location=True, max_tokens=MAX_GRAPHQL_TOKENS)
+    except GraphQLError:
+        raise ReadOnlyViolation("GraphQL document is not valid GraphQL") from None
+    operations = [d for d in ast.definitions if isinstance(d, OperationDefinitionNode)]
+    if any(
+        not isinstance(d, OperationDefinitionNode | FragmentDefinitionNode) for d in ast.definitions
+    ):
+        raise ReadOnlyViolation("GraphQL document may only contain a query and fragments")
+    if len(operations) != 1:
+        raise ReadOnlyViolation("GraphQL document must contain exactly one operation")
+    [operation] = operations
+    if operation.operation is not OperationType.QUERY:
+        raise ReadOnlyViolation("GraphQL operation must be a query (no mutations/subscriptions)")
+    if operation_name is not None and (
+        operation.name is None or operation.name.value != operation_name
+    ):
+        raise ReadOnlyViolation("operationName does not name the query in the document")
 
 
 class ReadOnlyTransport(httpx.BaseTransport):
