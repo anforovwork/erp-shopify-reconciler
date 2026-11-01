@@ -14,6 +14,7 @@ from reconciler.models import (
     CheckName,
     Discrepancy,
     DiscrepancyType,
+    ErpBin,
     ErpItem,
     ErpItemPrice,
     ShopifyShop,
@@ -303,6 +304,52 @@ def _price_finding(
             source_of_truth=System.ERPNEXT,
             suggested_action="Update the Shopify price to the ERPNext price.",
         )
+    return None
+
+
+# --- Stock ---------------------------------------------------------------------------------
+
+
+def check_stock(
+    matched: dict[str, MatchedProduct], bins: Iterable[ErpBin], options: ReconcileOptions
+) -> Findings:
+    """Shopify on_hand at the configured location vs ERPNext Bin actual_qty in the warehouse."""
+    erp_qty = {b.item_code: b.actual_qty for b in bins if b.warehouse == options.warehouse}
+    findings = Findings()
+    for sku, product in matched.items():
+        # No Bin row means no stock transaction yet, i.e. zero.
+        qty = erp_qty.get(product.item.item_code, Decimal(0))
+        reason = _stock_skip_reason(product, qty, options)
+        if reason:
+            findings.skipped.append(SkippedCheck(check=CheckName.STOCK, key=sku, reason=reason))
+        elif Decimal(product.variant.on_hand or 0) != qty:
+            findings.discrepancies.append(
+                Discrepancy(
+                    type=DiscrepancyType.STOCK_MISMATCH,
+                    key=sku,
+                    shopify_value=Decimal(product.variant.on_hand or 0),
+                    erp_value=qty,
+                    source_of_truth=System.ERPNEXT,
+                    suggested_action=(
+                        "Confirm the ERPNext warehouse count, then set Shopify on-hand "
+                        "inventory to match it."
+                    ),
+                )
+            )
+    return findings
+
+
+def _stock_skip_reason(
+    product: MatchedProduct, erp_qty: Decimal, options: ReconcileOptions
+) -> str | None:
+    if not product.variant.inventory_tracked:
+        return "Inventory is not tracked in Shopify for this variant."
+    if product.variant.on_hand is None:
+        return "Variant is not stocked at the configured Shopify location."
+    if product.item.stock_uom not in options.unit_uoms:
+        return "ERPNext stock UOM is not in ERPNEXT_UNIT_UOMS, so units are not comparable."
+    if erp_qty != erp_qty.to_integral_value():
+        return "ERPNext quantity is fractional; Shopify counts whole units."
     return None
 
 

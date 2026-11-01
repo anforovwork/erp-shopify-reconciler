@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 import pytest
-from builders import day, item, options, price, variant
+from builders import day, item, options, price, stock_bin, variant
 
 from reconciler.models import CheckName, DiscrepancyType, ErpItem, ErpItemPrice, ShopifyShop, System
 from reconciler.reconcile import (
@@ -9,6 +9,7 @@ from reconciler.reconcile import (
     check_missing,
     check_prices,
     check_sku_quality,
+    check_stock,
     index_erp_items,
     index_shopify_variants,
     is_in_scope,
@@ -268,3 +269,71 @@ def test_matching_currencies_are_valid() -> None:
 def test_currency_mismatch_is_a_configuration_error(shop: str, price_list: str) -> None:
     with pytest.raises(ConfigurationError, match="Currency mismatch"):
         validate_currencies(shop, price_list, "CAD")
+
+
+# --- Stock ---------------------------------------------------------------------------------
+
+
+def _stock_findings(erp_bins: list, erp_item: ErpItem | None = None, **variant_fields: object):
+    shopify = index_shopify_variants([variant("SKU-1", **variant_fields)])
+    erp = index_erp_items([erp_item or item("SKU-1")], options())
+    return check_stock(match_products(shopify, erp), erp_bins, options())
+
+
+def test_equal_stock_matches() -> None:
+    findings = _stock_findings([stock_bin("SKU-1", "5")], on_hand=5)
+
+    assert findings.discrepancies == []
+    assert findings.skipped == []
+
+
+def test_stock_difference_is_a_mismatch() -> None:
+    findings = _stock_findings([stock_bin("SKU-1", "3")], on_hand=5)
+
+    [found] = findings.discrepancies
+    assert found.type is DiscrepancyType.STOCK_MISMATCH
+    assert (found.shopify_value, found.erp_value) == (Decimal(5), Decimal(3))
+    assert found.source_of_truth is System.ERPNEXT
+
+
+def test_whole_erp_quantity_with_decimals_is_not_fractional() -> None:
+    findings = _stock_findings([stock_bin("SKU-1", "5.000")], on_hand=5)
+
+    assert findings.discrepancies == []
+    assert findings.skipped == []
+
+
+def test_missing_bin_means_zero_stock() -> None:
+    assert _stock_findings([], on_hand=0).discrepancies == []
+    assert [d.erp_value for d in _stock_findings([], on_hand=2).discrepancies] == [Decimal(0)]
+
+
+def test_bins_in_other_warehouses_are_ignored() -> None:
+    findings = _stock_findings(
+        [stock_bin("SKU-1", "99", warehouse="Other - TC"), stock_bin("SKU-1", "5")], on_hand=5
+    )
+
+    assert findings.discrepancies == []
+
+
+@pytest.mark.parametrize(
+    ("erp_bins", "erp_item", "variant_fields", "reason_start"),
+    [
+        ([stock_bin("SKU-1", "1")], None, {"inventory_tracked": False}, "Inventory is not tracked"),
+        ([stock_bin("SKU-1", "1")], None, {"on_hand": None}, "Variant is not stocked"),
+        ([stock_bin("SKU-1", "1")], item("SKU-1", stock_uom="Kg"), {}, "ERPNext stock UOM"),
+        ([stock_bin("SKU-1", "2.5")], None, {}, "ERPNext quantity is fractional"),
+    ],
+)
+def test_incomparable_stock_is_skipped_with_reason(
+    erp_bins: list,
+    erp_item: ErpItem | None,
+    variant_fields: dict[str, object],
+    reason_start: str,
+) -> None:
+    findings = _stock_findings(erp_bins, erp_item, **variant_fields)
+
+    assert findings.discrepancies == []
+    [skipped] = findings.skipped
+    assert (skipped.check, skipped.key) == (CheckName.STOCK, "SKU-1")
+    assert skipped.reason.startswith(reason_start)
