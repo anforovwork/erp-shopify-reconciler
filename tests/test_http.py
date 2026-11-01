@@ -133,42 +133,168 @@ def test_erpnext_requests_to_another_host_are_blocked() -> None:
     assert recorder.requests == []
 
 
-# --- Shopify guard -------------------------------------------------------------------------
+# --- Shopify guard: GraphQL documents (parsed by graphql-core) ----------------------------
+
+ALLOWED_DOCUMENTS = {
+    "named query": "query { shop { name } }",
+    "anonymous shorthand": "{ shop { name } }",
+    "variables": (
+        "query Products($after: String) { products(first: 10, after: $after) { nodes { id } } }"
+    ),
+    "comment mentioning mutation": "# mutation { productDelete }\nquery { shop { name } }",
+    "string containing mutation": 'query { products(query: "mutation { x }") { nodes { id } } }',
+    "block string containing mutation": 'query { products(query: """\nmutation { x }\n""") '
+    "{ nodes { id } } }",
+    "alias named mutation": "query { mutation: shop { name } subscription: shop { id } }",
+    "field named mutation": "query { mutation { id } }",
+    "directives": "query($s: Boolean!) { shop { name @include(if: $s) id @skip(if: true) } }",
+    "named fragment": "query { shop { ...F } } fragment F on Shop { name }",
+    "fragment before query": "fragment F on Shop { name } query Q { shop { ...F } }",
+    "inline fragment": 'query { node(id: "1") { ... on Product { title } } }',
+    "unicode escape in string": 'query { products(query: "\\u006dutation") { nodes { id } } }',
+}
+
+REJECTED_DOCUMENTS = {
+    "mutation": 'mutation { productDelete(input: {id: "1"}) { deletedProductId } }',
+    "named mutation": 'mutation Wipe { productDelete(input: {id: "1"}) { userErrors { field } } }',
+    "subscription": "subscription { productUpdated { id } }",
+    "query then mutation": "query A { shop { name } } mutation B { x }",
+    "mutation then query": "mutation B { x } query A { shop { name } }",
+    "two queries": "query A { shop { name } } query B { shop { id } }",
+    "anonymous plus named": "{ shop { name } } query B { shop { id } }",
+    "only a fragment": "fragment F on Shop { name }",
+    "only a comment": "# query { shop { name } }",
+    "empty": "",
+    "whitespace": "   \n\t ",
+    "unbalanced braces": "query { shop { name }",
+    "extra closing brace": "query { shop } }",
+    "uppercase keyword": "MUTATION { x }",
+    "mutation hidden in comment line break": "query { shop { name } }\n#\nmutation { x }",
+    "unterminated string": 'query { products(query: "mutation) { nodes { id } } }',
+    "schema definition": "type Query { shop: Shop }",
+    "schema extension": "extend type Shop { evil: String } query { shop { name } }",
+    "directive definition": "directive @x on FIELD query { shop { name } }",
+    "fragment variables (experimental syntax)": (
+        "query { shop { ...F(a: 1) } } fragment F($a: Int) on Shop { name }"
+    ),
+    "not graphql": "SELECT * FROM products",
+    "json": '{"query": "mutation { x }"}',
+}
 
 
-@pytest.mark.parametrize(
-    "document",
-    [
-        "query { shop { name } }",
-        "{ shop { name } }",
-        "query Products($after: String) { products(first: 10, after: $after) { nodes { id } } }",
-        "# mutation in a comment\nquery { shop { name } }",
-        'query { products(query: "mutation") { nodes { id } } }',
-        'query { products(query: """\nmutation { x }\n""") { nodes { id } } }',
-        'query { node(id: "1") { ... F } } fragment F on Product { id }',
-        "query { mutation: shop { name } }",  # alias / field name inside a selection
-    ],
-)
-def test_query_documents_are_allowed(document: str) -> None:
+@pytest.mark.parametrize("document", ALLOWED_DOCUMENTS.values(), ids=ALLOWED_DOCUMENTS.keys())
+def test_read_only_documents_are_allowed(document: str) -> None:
     ensure_query_only(document)
 
 
-@pytest.mark.parametrize(
-    "document",
-    [
-        'mutation { productDelete(input: {id: "1"}) { deletedProductId } }',
-        "subscription { x }",
-        "query { shop { name } } mutation { x }",
-        "# only a comment",
-        "",
-        "query { shop { name }",
-        "query { shop } }",
-        "MUTATION { x }",  # unknown keyword is rejected, not ignored
-    ],
-)
-def test_non_query_documents_are_rejected(document: str) -> None:
+@pytest.mark.parametrize("document", REJECTED_DOCUMENTS.values(), ids=REJECTED_DOCUMENTS.keys())
+def test_writes_malformed_and_unsupported_documents_are_rejected(document: str) -> None:
     with pytest.raises(ReadOnlyViolation):
         ensure_query_only(document)
+
+
+@pytest.mark.parametrize("document", REJECTED_DOCUMENTS.values(), ids=REJECTED_DOCUMENTS.keys())
+def test_rejected_documents_never_reach_the_transport(document: str) -> None:
+    recorder = Recorder(ok({"data": {}}))
+    graphql = _shop(recorder)
+
+    with pytest.raises(ReadOnlyViolation):
+        graphql.query(document)
+    with pytest.raises(ReadOnlyViolation):  # bypassing ShopifyGraphQL.query is caught too
+        graphql._client.request_json("POST", GRAPHQL, json_body={"query": document})
+
+    assert recorder.requests == []
+
+
+def test_oversized_documents_are_rejected() -> None:
+    huge_but_valid = "query { shop { " + "name " * 5_000 + "} }"
+
+    with pytest.raises(ReadOnlyViolation, match="too large"):
+        ensure_query_only(huge_but_valid)
+
+
+def test_token_limit_applies_below_the_size_limit() -> None:
+    many_tokens = "query { shop { " + "a " * 3_000 + "} }"  # < 20k chars, > 2k tokens
+
+    with pytest.raises(ReadOnlyViolation, match="not valid GraphQL"):
+        ensure_query_only(many_tokens)
+
+
+def test_parser_error_text_is_not_echoed() -> None:
+    with pytest.raises(ReadOnlyViolation) as error:
+        ensure_query_only('query { products(query: "secret-looking" ')
+
+    assert "secret-looking" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("operation_name", "allowed"), [(None, True), ("Q", True), ("Other", False), ("", False)]
+)
+def test_operation_name_must_name_the_query(operation_name: str | None, allowed: bool) -> None:
+    document = "query Q { shop { name } }"
+    if allowed:
+        ensure_query_only(document, operation_name)
+    else:
+        with pytest.raises(ReadOnlyViolation):
+            ensure_query_only(document, operation_name)
+
+
+def test_operation_name_on_anonymous_query_is_rejected() -> None:
+    with pytest.raises(ReadOnlyViolation):
+        ensure_query_only("{ shop { name } }", "Q")
+
+
+# --- Shopify guard: HTTP request shape -----------------------------------------------------
+
+
+def _raw_post(
+    graphql: ShopifyGraphQL,
+    content: bytes,
+    content_type: str = "application/json",
+    url: str = GRAPHQL,
+) -> None:
+    graphql._client._client.post(url, content=content, headers={"Content-Type": content_type})
+
+
+@pytest.mark.parametrize(
+    ("content", "content_type", "url"),
+    [
+        # Duplicate keys: a server keeping the first "query" would run the mutation.
+        (b'{"query": "mutation { x }", "query": "query { shop { name } }"}', None, GRAPHQL),
+        # Persisted-query hash could run a stored document we never inspected.
+        (
+            b'{"query": "query { shop { name } }", "extensions": {"persistedQuery": {}}}',
+            None,
+            GRAPHQL,
+        ),
+        (b'{"query": "query { shop { name } }", "variables": []}', None, GRAPHQL),
+        (b'{"query": "query { shop { name } }", "operationName": 1}', None, GRAPHQL),
+        (b'[{"query": "query { shop { name } }"}]', None, GRAPHQL),  # batched requests
+        (b"query { shop { name } }", "application/graphql", GRAPHQL),
+        (b'{"query": "query { shop { name } }"}', "text/plain", GRAPHQL),
+        (b"not json", None, GRAPHQL),
+        (b'{"query": "query { shop { name } }"}', None, GRAPHQL + "?query=mutation%7Bx%7D"),
+        (b'{"query": "query { shop { name } }"}', None, GRAPHQL.upper()),
+        (b'{"query": "query { shop { name } }"}', None, GRAPHQL + "/"),
+    ],
+)
+def test_malformed_or_ambiguous_shopify_requests_are_blocked(
+    content: bytes, content_type: str | None, url: str
+) -> None:
+    recorder = Recorder(ok({"data": {}}))
+
+    with pytest.raises(ReadOnlyViolation):
+        _raw_post(_shop(recorder), content, content_type or "application/json", url)
+
+    assert recorder.requests == []
+
+
+def test_well_formed_raw_query_passes_the_transport() -> None:
+    recorder = Recorder(ok({"data": {}}))
+
+    _raw_post(_shop(recorder), b'{"query": "query Q { shop { name } }", "operationName": "Q"}')
+
+    assert len(recorder.requests) == 1
 
 
 def test_shopify_mutation_is_rejected_before_any_request() -> None:

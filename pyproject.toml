@@ -14,6 +14,9 @@ dependencies = [
   "pydantic>=2.7,<3",
   "pydantic-settings>=2.7,<3",  # 2.7 adds NoDecode (comma-separated lists)
   "mcp>=2.3,<3",
+  # Standards-compliant GraphQL parser for the query-only guard. Minor versions follow
+  # GraphQL.js and may break, so the pin stays within 3.3.x.
+  "graphql-core>=3.3.1,<3.4",
 ]
 
 [project.optional-dependencies]
