@@ -25,6 +25,7 @@ Amend, Import, Export, Print, Email and Share **unticked**.
 | Item Price | selling prices |
 | Price List | price list currency |
 | Bin | stock per warehouse |
+| Warehouse | confirm the configured warehouse exists before a missing Bin counts as zero |
 | Sales Order | order matching (custom GID field, `docstatus`) |
 
 ## 3. Create the user
