@@ -23,13 +23,17 @@ The goal is one trusted answer for every number, and a clear record of which sys
 
 1. **Read-only.** No code in this repo may create, update or delete data in Shopify or ERPNext.
    - Shopify: GraphQL Admin API only. Every request is an HTTP `POST` to `/admin/api/<version>/graphql.json`
-     whose operation is a **query**; the HTTP layer rejects mutations and subscriptions, with tests.
+     whose document, parsed by **graphql-core**, is exactly one **query** plus fragments; mutations,
+     subscriptions, several operations, schema definitions and invalid syntax are rejected. The JSON
+     body may only contain `query`/`variables`/`operationName`, without duplicate keys.
      Token scopes: `read_products`, `read_inventory`, `read_orders` only — checked at startup; a token
      with any `write_*` scope is rejected.
    - ERPNext: only `GET` requests on `/api/resource/...`, enforced in the HTTP layer. `/api/method/...`
      only for an explicit allowlist of read-only methods (Frappe whitelisted methods can write), and never
      the `run_method`/`cmd` parameters (Frappe runs a document method for
-     `GET /api/resource/<doctype>/<name>?run_method=...`). The API user has a dedicated read-only role
+     `GET /api/resource/<doctype>/<name>?run_method=...`). No request body (Frappe uses a JSON body
+     as its parameters even on GET), no method-override headers, and paths/parameters are checked
+     after URL decoding (no `..`, empty segments, `;`, `\\`, `%` or control characters). The API user has a dedicated read-only role
      (see `docs/erpnext-readonly-user.md`).
    - The guards live in `sources/http.py` as an httpx transport, so no client code can bypass them.
      Requests go only to the configured host; redirects are never followed.

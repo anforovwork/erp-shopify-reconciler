@@ -47,23 +47,44 @@ _FORBIDDEN_ERPNEXT_PARAMS = frozenset({"run_method", "cmd"})
 Policy = Callable[[httpx.Request], None]
 
 
+_METHOD_OVERRIDE_HEADERS = ("x-http-method-override", "x-http-method", "x-method-override")
+_UNSAFE_PATH_CHARS = frozenset(";\\%") | {chr(c) for c in range(32)} | {"\x7f"}
+
+
 def erpnext_policy(host: str, allowed_methods: frozenset[str] = ERPNEXT_SAFE_METHODS) -> Policy:
+    """Checks run on the *decoded* URL (httpx decodes %XX), so encoded tricks are caught too."""
+
     def check(request: httpx.Request) -> None:
         _check_host(request, host)
         if request.method != "GET":
             raise ReadOnlyViolation(f"ERPNext: only GET is allowed, not {request.method}")
-        path = request.url.path
-        if ".." in path.split("/"):
-            raise ReadOnlyViolation("ERPNext: path traversal is not allowed")
-        if path.startswith("/api/method/"):
-            if path.removeprefix("/api/method/") not in allowed_methods:
-                raise ReadOnlyViolation("ERPNext: this /api/method call is not on the allowlist")
-        elif not path.startswith("/api/resource/"):
-            raise ReadOnlyViolation("ERPNext: only /api/resource/ paths are allowed")
-        if _FORBIDDEN_ERPNEXT_PARAMS & {key.lower() for key in request.url.params}:
+        if request.content or "content-length" in request.headers:
+            # Frappe builds form_dict from a JSON body even on GET, replacing the URL params.
+            raise ReadOnlyViolation("ERPNext: GET requests must not have a body")
+        if any(name in request.headers for name in _METHOD_OVERRIDE_HEADERS):
+            raise ReadOnlyViolation("ERPNext: method-override headers are not allowed")
+        _check_erpnext_path(request.url.path, allowed_methods)
+        if ";" in request.url.query.decode("ascii", "replace"):
+            raise ReadOnlyViolation("ERPNext: ';' in the query string is not allowed")
+        if _FORBIDDEN_ERPNEXT_PARAMS & {_param_key(key) for key in request.url.params}:
             raise ReadOnlyViolation("ERPNext: run_method/cmd parameters execute code")
 
     return check
+
+
+def _check_erpnext_path(path: str, allowed_methods: frozenset[str]) -> None:
+    segments = path.split("/")[1:]
+    if _UNSAFE_PATH_CHARS & set(path) or any(s in ("", ".", "..") for s in segments[:-1]):
+        raise ReadOnlyViolation("ERPNext: unsafe or ambiguous path")
+    if path.startswith("/api/method/"):
+        if path.removeprefix("/api/method/") not in allowed_methods:
+            raise ReadOnlyViolation("ERPNext: this /api/method call is not on the allowlist")
+    elif not path.startswith("/api/resource/") or segments[-1] in (".", ".."):
+        raise ReadOnlyViolation("ERPNext: only /api/resource/ paths are allowed")
+
+
+def _param_key(key: str) -> str:
+    return key.strip().lower().removesuffix("[]")
 
 
 def shopify_policy(host: str, api_version: str) -> Policy:

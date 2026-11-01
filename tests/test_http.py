@@ -124,6 +124,91 @@ def test_erpnext_read_only_method_on_allowlist_is_allowed() -> None:
     }
 
 
+def _raw_erp_get(recorder: Recorder, url: str, **kwargs: object) -> None:
+    """Send through the real ReadOnlyTransport, bypassing request_json's conveniences."""
+    _erp(recorder)._client.request("GET", url, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Encoded parameter names are decoded before checking.
+        "/api/resource/Item/X?run%5Fmethod=cancel",
+        "/api/resource/Item/X?%72un_method=cancel",
+        "/api/resource/Item/X?Run_Method=cancel",
+        "/api/resource/Item/X?run_method%20=cancel",
+        "/api/resource/Item/X?run_method[]=cancel",
+        "/api/resource/Item?cmd=frappe.client.delete",
+        "/api/resource/Item?a=1;run_method=cancel",
+        # Alternate and traversing paths to /api/method or elsewhere.
+        "/api/resource/%2e%2e/method/frappe.client.delete",
+        "/api/resource/Item%2F..%2F..%2Fmethod%2Ffrappe.client.delete",
+        "/api/resource/Item/%2e%2e",
+        "/api//resource/Item",
+        "//api/method/frappe.client.delete",
+        "/api/method/frappe.auth.get_logged_user/../../method/frappe.client.delete",
+        "/api/method/frappe.auth.get_logged_user%2F..%2Ffrappe.client.delete",
+        "/api/method/frappe.client.delete",
+        "/api/method/frappe.auth.get_logged_user;x",
+        "/API/resource/Item",
+        "/api/resource%5CItem",
+        "/api/resource/Item%00",
+        "/api/resource/Item%253Brun_method",  # double encoding leaves a '%'
+        "/api/v2/document/Item",
+        "/api/v2/method/frappe.client.delete",
+        "/app/item",
+        "/",
+    ],
+)
+def test_erpnext_bypass_attempts_never_reach_the_transport(url: str) -> None:
+    recorder = Recorder(ok({}))
+
+    with pytest.raises(ReadOnlyViolation):
+        _raw_erp_get(recorder, url)
+
+    assert recorder.requests == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"json": {"run_method": "cancel"}},  # Frappe uses a JSON body as form_dict, even on GET
+        {"content": b"run_method=cancel"},
+        {"data": {"run_method": "cancel"}},
+        {"headers": {"X-HTTP-Method-Override": "DELETE"}},
+        {"headers": {"X-HTTP-Method": "PUT"}},
+        {"headers": {"X-Method-Override": "POST"}},
+    ],
+)
+def test_erpnext_get_with_body_or_method_override_is_blocked(kwargs: dict) -> None:
+    recorder = Recorder(ok({}))
+
+    with pytest.raises(ReadOnlyViolation):
+        _raw_erp_get(recorder, "/api/resource/Item", **kwargs)
+
+    assert recorder.requests == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/api/resource/Item",
+        "/api/resource/Item/",
+        "/api/resource/Item%20Price",
+        "/api/resource/Item/TEST-SKU-1",
+        "/api/resource/./Item",  # httpx normalizes this to /api/resource/Item before sending
+        '/api/resource/Item?fields=["name"]&filters=[["item_group","=","A B"]]',
+        "/api/method/frappe.auth.get_logged_user",
+    ],
+)
+def test_ordinary_erpnext_reads_pass(url: str) -> None:
+    recorder = Recorder(ok({"data": []}))
+
+    _raw_erp_get(recorder, url)
+
+    assert len(recorder.requests) == 1
+
+
 def test_erpnext_requests_to_another_host_are_blocked() -> None:
     recorder = Recorder(ok({}))
 
