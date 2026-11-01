@@ -90,6 +90,7 @@ def test_erpnext_integer_flags_become_booleans() -> None:
         (DiscrepancyType.SKU_DUPLICATE, DiscrepancyCategory.DATA_QUALITY),
         (DiscrepancyType.PRICE_MISSING, DiscrepancyCategory.DATA_QUALITY),
         (DiscrepancyType.PRICE_AMBIGUOUS, DiscrepancyCategory.DATA_QUALITY),
+        (DiscrepancyType.PRICE_UOM_MISSING, DiscrepancyCategory.DATA_QUALITY),
     ],
 )
 def test_discrepancy_category(

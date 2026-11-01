@@ -86,6 +86,8 @@ class ErpItemPrice(_Record):
     batch_no: str | None
     valid_from: date | None
     valid_upto: date | None
+    packing_unit: int
+    """0 = any quantity; n > 0 = only applies to multiples of n (ERPNext semantics)."""
 
 
 class ErpBin(_Record):
@@ -129,6 +131,7 @@ class DiscrepancyType(StrEnum):
     SKU_DUPLICATE = "SKU_DUPLICATE"
     PRICE_MISSING = "PRICE_MISSING"
     PRICE_AMBIGUOUS = "PRICE_AMBIGUOUS"
+    PRICE_UOM_MISSING = "PRICE_UOM_MISSING"
 
     @property
     def category(self) -> DiscrepancyCategory:
@@ -143,6 +146,7 @@ _DATA_QUALITY_TYPES = frozenset(
         DiscrepancyType.SKU_DUPLICATE,
         DiscrepancyType.PRICE_MISSING,
         DiscrepancyType.PRICE_AMBIGUOUS,
+        DiscrepancyType.PRICE_UOM_MISSING,
     }
 )
 

@@ -264,17 +264,29 @@ def tax_treatment_matches(shop: ShopifyShop, options: ReconcileOptions) -> bool:
     )
 
 
-def is_applicable_price(price: ErpItemPrice, item: ErpItem, options: ReconcileOptions) -> bool:
+def price_row_fits(price: ErpItemPrice, item: ErpItem, options: ReconcileOptions) -> bool:
+    """Every applicability rule except UOM. packing_unit 0 or 1 is what ERPNext uses for a
+    quantity of one (other values only apply to multiples of the pack size)."""
     run_date = options.as_of.date()
     return (
         price.item_code == item.item_code
         and price.price_list == options.price_list
         and not price.customer
         and not price.batch_no
-        and price.uom == item.stock_uom
+        and price.packing_unit in (0, 1)
         and (price.valid_from is None or price.valid_from <= run_date)
         and (price.valid_upto is None or run_date <= price.valid_upto)
     )
+
+
+def is_applicable_price(price: ErpItemPrice, item: ErpItem, options: ReconcileOptions) -> bool:
+    return price_row_fits(price, item, options) and price.uom == item.stock_uom
+
+
+def has_unset_uom(price: ErpItemPrice, item: ErpItem, options: ReconcileOptions) -> bool:
+    """A fitting row without UOM. ERPNext v16 requires the field, yet its own price lookup
+    treats an empty UOM as matching any UOM, so whether it applies is unclear."""
+    return price_row_fits(price, item, options) and not (price.uom or "").strip()
 
 
 def check_prices(
@@ -303,16 +315,32 @@ def check_prices(
 
     for sku, product in matched.items():
         candidates = prices_by_code.get(product.item.item_code, [])
+        unset_uom = [p for p in candidates if has_unset_uom(p, product.item, options)]
         applicable = [p for p in candidates if is_applicable_price(p, product.item, options)]
-        finding = _price_finding(sku, product.variant.price, applicable, compare)
+        finding = _price_finding(sku, product.variant.price, applicable, unset_uom, compare)
         if finding:
             findings.discrepancies.append(finding)
     return findings
 
 
 def _price_finding(
-    sku: str, shopify_price: Decimal, applicable: list[ErpItemPrice], compare: bool
+    sku: str,
+    shopify_price: Decimal,
+    applicable: list[ErpItemPrice],
+    unset_uom: list[ErpItemPrice],
+    compare: bool,
 ) -> Discrepancy | None:
+    if unset_uom:
+        return Discrepancy(
+            type=DiscrepancyType.PRICE_UOM_MISSING,
+            key=sku,
+            shopify_value=shopify_price,
+            source_of_truth=System.ERPNEXT,
+            suggested_action=(
+                "Set the UOM on the Item Price row(s); until then the price is not compared."
+            ),
+            detail=f"{len(unset_uom)} otherwise applicable price row(s) without UOM",
+        )
     if not applicable:
         return Discrepancy(
             type=DiscrepancyType.PRICE_MISSING,

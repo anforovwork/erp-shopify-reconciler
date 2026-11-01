@@ -32,7 +32,8 @@ The full v1 rules are in [CLAUDE.md](../CLAUDE.md#reconciliation-rules-v1-decide
 | `price_list` | equals `ERPNEXT_PRICE_LIST` |
 | `customer` | empty (no customer-specific prices) |
 | `batch_no` | empty (no batch-specific prices) |
-| `uom` | equals the item's `stock_uom` (an empty UOM is not applicable) |
+| `uom` | equals the item's `stock_uom`. Empty UOM → `PRICE_UOM_MISSING` (ERPNext v16 requires it; its own lookup treats empty as "any UOM") |
+| `packing_unit` | 0 or 1 (larger values only apply to multiples of the pack size) |
 | `valid_from` / `valid_upto` | run date inside the range, inclusive; empty = open-ended |
 
 ## Eligible Shopify orders

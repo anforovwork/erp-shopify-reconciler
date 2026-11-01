@@ -255,7 +255,7 @@ def test_price_tolerance_is_strictly_greater_than_one_cent(
         price("SKU-1", "99.00", customer="TEST-CUSTOMER"),
         price("SKU-1", "99.00", batch_no="TEST-BATCH"),
         price("SKU-1", "99.00", uom="Box"),
-        price("SKU-1", "99.00", uom=None),
+        price("SKU-1", "99.00", packing_unit=6),  # pack price, not for one unit
         price("SKU-1", "99.00", valid_from=day(1)),
         price("SKU-1", "99.00", valid_upto=day(-1)),
     ],
@@ -278,6 +278,35 @@ def test_no_applicable_price_is_price_missing() -> None:
     findings = _price_findings("10.00", [price("SKU-1", "10.00", customer="TEST-CUSTOMER")])
 
     assert [d.type for d in findings.discrepancies] == [DiscrepancyType.PRICE_MISSING]
+
+
+def test_packing_unit_one_applies_to_a_single_unit() -> None:
+    findings = _price_findings("10.00", [price("SKU-1", "10.00", packing_unit=1)])
+
+    assert findings.discrepancies == []
+
+
+@pytest.mark.parametrize("unset", [None, "", "  "])
+def test_price_row_without_uom_is_its_own_data_quality_issue(unset: str | None) -> None:
+    findings = _price_findings("10.00", [price("SKU-1", "15.00", uom=unset)])
+
+    [found] = findings.discrepancies  # not PRICE_MISSING, and no numeric comparison
+    assert found.type is DiscrepancyType.PRICE_UOM_MISSING
+    assert found.detail == "1 otherwise applicable price row(s) without UOM"
+
+
+def test_row_without_uom_blocks_comparison_even_next_to_a_valid_row() -> None:
+    findings = _price_findings(
+        "10.00", [price("SKU-1", "99.00"), price("SKU-1", "10.00", uom=None)]
+    )
+
+    assert [d.type for d in findings.discrepancies] == [DiscrepancyType.PRICE_UOM_MISSING]
+
+
+def test_row_without_uom_that_does_not_otherwise_fit_is_ignored() -> None:
+    erp_prices = [price("SKU-1", "10.00"), price("SKU-1", "5.00", uom=None, customer="TEST-C")]
+
+    assert _price_findings("10.00", erp_prices).discrepancies == []
 
 
 def test_several_applicable_prices_are_ambiguous() -> None:
