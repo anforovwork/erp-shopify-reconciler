@@ -16,9 +16,12 @@ from reconciler.models import (
     Discrepancy,
     DiscrepancyType,
     ErpBin,
+    ErpData,
     ErpItem,
     ErpItemPrice,
     ErpSalesOrder,
+    ReconciliationResult,
+    ShopifyData,
     ShopifyOrder,
     ShopifyShop,
     ShopifyVariant,
@@ -416,6 +419,35 @@ def _order_not_in_erp(order_id: str, docstatuses: set[int]) -> Discrepancy:
             "the order GID in the mapping field."
         ),
         detail=detail,
+    )
+
+
+# --- Everything together -------------------------------------------------------------------
+
+
+def reconcile(
+    shopify: ShopifyData, erp: ErpData, options: ReconcileOptions
+) -> ReconciliationResult:
+    """Run every rule. Raises ConfigurationError when currencies cannot be compared."""
+    validate_currencies(shopify.shop.currency, erp.price_list_currency, options.currency)
+
+    shopify_index = index_shopify_variants(shopify.variants)
+    erp_index = index_erp_items(erp.items, options)
+    matched = match_products(shopify_index, erp_index)
+
+    findings = Findings(discrepancies=check_sku_quality(shopify_index, erp_index))
+    findings.discrepancies += check_missing(shopify_index, erp_index)
+    findings.extend(check_prices(matched, erp.prices, shopify.shop, options))
+    findings.extend(check_stock(matched, erp.bins, options))
+    findings.extend(check_orders(shopify.orders, erp.sales_orders, options))
+
+    return ReconciliationResult(
+        generated_at=options.as_of,
+        shopify_fetched_at=shopify.fetched_at,
+        erpnext_fetched_at=erp.fetched_at,
+        discrepancies=tuple(findings.discrepancies),
+        skipped=tuple(findings.skipped),
+        warnings=tuple(findings.warnings),
     )
 
 
