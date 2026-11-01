@@ -29,7 +29,8 @@ The goal is one trusted answer for every number, and a clear record of which sys
    - ERPNext: only `GET` requests, enforced in the HTTP layer. The API user has a dedicated read-only role
      (see `docs/erpnext-readonly-user.md`).
    - Never create or modify records in either system — not even test data or a missing custom field.
-     Test data is created by hand, outside this tool.
+     Test data is created by hand, outside this tool. This holds during testing too: no write
+     requests, not even ones expected to fail.
    - If a future feature needs a write, it must be a separate, explicitly approved task with a human-approval step. Do not add one on your own.
 2. **No secrets in code or git.** Credentials come only from environment variables loaded from `.env`
    (git-ignored). Keep `.env.example` updated with variable names and fake values. Never put secrets in
@@ -92,6 +93,9 @@ HOURS.md             # time log (date, hours, what was done)
 whitespace. Empty SKUs and SKUs that appear more than once (after trimming) in one system are reported as
 data-quality discrepancies; such SKUs get no other check.
 
+**Shopify scope.** Only variants of products with status `ACTIVE`. `DRAFT`, `ARCHIVED` and `UNLISTED`
+products are excluded in v1 (known limitation: a SKU that exists only on such a product is not seen).
+
 **ERPNext scope.** Only items that are enabled (`disabled = 0`), sales items (`is_sales_item = 1`),
 stock items (`is_stock_item = 1`, which excludes services), not variant templates (`has_variants = 0`),
 and in one of the configured Item Groups (`ERPNEXT_ITEM_GROUPS`). Items outside this scope never produce
@@ -124,7 +128,9 @@ whose inventory is not tracked, variants not stocked at the location, items whos
 **Orders.** Shopify order GID (`gid://shopify/Order/…`) is the identifier. Eligible orders: created within
 `ORDER_LOOKBACK_DAYS` (default 30, maximum 60 — `read_orders` only exposes 60 days and v1 never
 requests `read_all_orders`), financial status `PAID`, not cancelled, not test; draft orders are
-never fetched. ERPNext stores the GID in a dedicated custom field on Sales Order (`ERPNEXT_ORDER_ID_FIELD`);
+never fetched. `INCLUDE_TEST_ORDERS` (default `false`) may include test orders, but only after the
+application has explicitly verified through the API that it is connected to an approved Shopify
+development store; otherwise setting it is a configuration error. It is never enabled automatically. ERPNext stores the GID in a dedicated custom field on Sales Order (`ERPNEXT_ORDER_ID_FIELD`);
 only submitted Sales Orders (`docstatus = 1`) count as a match. If the field is not configured or does not
 exist, order reconciliation is skipped with a warning — the tool never creates the field.
 

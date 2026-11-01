@@ -36,6 +36,12 @@ The full v1 rules are in [CLAUDE.md](../CLAUDE.md#reconciliation-rules-v1-decide
 | `packing_unit` | 0 or 1 (larger values only apply to multiples of the pack size) |
 | `valid_from` / `valid_upto` | run date (calendar day in `ERPNEXT_TIMEZONE`) inside the range, inclusive; empty = open-ended |
 
+## Shopify variants in scope
+
+| Shopify field | Rule |
+|---|---|
+| `Product.status` | `ACTIVE` only (`DRAFT`, `ARCHIVED`, `UNLISTED` excluded in v1) |
+
 ## Eligible Shopify orders
 
 | Shopify field | Rule |
@@ -43,5 +49,5 @@ The full v1 rules are in [CLAUDE.md](../CLAUDE.md#reconciliation-rules-v1-decide
 | `createdAt` | within the last `ORDER_LOOKBACK_DAYS` days (default 30, max 60) |
 | `displayFinancialStatus` | `PAID` |
 | `cancelledAt` | empty |
-| `test` | false |
+| `test` | false (unless `INCLUDE_TEST_ORDERS=true` on a verified, approved development store) |
 | Draft orders | never fetched (separate `DraftOrder` object) |
