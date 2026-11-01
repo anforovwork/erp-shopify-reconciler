@@ -1,12 +1,22 @@
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
-from builders import day, item, options, price, stock_bin, variant
+from builders import AS_OF, day, item, options, order, price, sales_order, stock_bin, variant
 
-from reconciler.models import CheckName, DiscrepancyType, ErpItem, ErpItemPrice, ShopifyShop, System
+from reconciler.models import (
+    CheckName,
+    DiscrepancyType,
+    ErpItem,
+    ErpItemPrice,
+    ShopifyOrder,
+    ShopifyShop,
+    System,
+)
 from reconciler.reconcile import (
     ConfigurationError,
     check_missing,
+    check_orders,
     check_prices,
     check_sku_quality,
     check_stock,
@@ -337,3 +347,67 @@ def test_incomparable_stock_is_skipped_with_reason(
     [skipped] = findings.skipped
     assert (skipped.check, skipped.key) == (CheckName.STOCK, "SKU-1")
     assert skipped.reason.startswith(reason_start)
+
+
+# --- Orders --------------------------------------------------------------------------------
+
+
+def _order_findings(orders: list, sales_orders: list | None):
+    return check_orders(orders, sales_orders, options())
+
+
+def test_order_with_submitted_sales_order_matches() -> None:
+    assert _order_findings([order(1)], [sales_order(1)]).discrepancies == []
+
+
+def test_order_without_sales_order_is_not_in_erp() -> None:
+    findings = _order_findings([order(1), order(2)], [sales_order(1)])
+
+    [found] = findings.discrepancies
+    assert (found.type, found.key) == (DiscrepancyType.ORDER_NOT_IN_ERP, "gid://shopify/Order/2")
+    assert found.source_of_truth is System.SHOPIFY
+    assert found.detail == ""
+
+
+@pytest.mark.parametrize(("docstatus", "detail"), [(0, "draft"), (2, "cancelled")])
+def test_only_submitted_sales_orders_count(docstatus: int, detail: str) -> None:
+    findings = _order_findings([order(1)], [sales_order(1, docstatus=docstatus)])
+
+    [found] = findings.discrepancies
+    assert found.type is DiscrepancyType.ORDER_NOT_IN_ERP
+    assert found.detail == f"only {detail} Sales Order(s) found"
+
+
+def test_mapping_field_is_trimmed() -> None:
+    erp = [sales_order(1, shopify_order_id="  gid://shopify/Order/1 ")]
+
+    assert _order_findings([order(1)], erp).discrepancies == []
+
+
+@pytest.mark.parametrize(
+    "ineligible",
+    [
+        order(1, financial_status="PENDING"),
+        order(1, financial_status="PARTIALLY_REFUNDED"),
+        order(1, cancelled=True),
+        order(1, test=True),
+        order(1, created_at=AS_OF - timedelta(days=30, seconds=1)),
+    ],
+)
+def test_ineligible_orders_are_not_checked(ineligible: ShopifyOrder) -> None:
+    assert _order_findings([ineligible], []).discrepancies == []
+
+
+def test_order_exactly_at_lookback_boundary_is_checked() -> None:
+    boundary = order(1, created_at=AS_OF - timedelta(days=30))
+
+    assert len(_order_findings([boundary], []).discrepancies) == 1
+
+
+def test_missing_mapping_field_skips_orders_with_warning() -> None:
+    findings = _order_findings([order(1)], None)
+
+    assert findings.discrepancies == []
+    [skipped] = findings.skipped
+    assert (skipped.check, skipped.key) == (CheckName.ORDER, None)
+    assert findings.warnings == [skipped.reason]

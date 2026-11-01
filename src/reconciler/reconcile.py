@@ -6,6 +6,7 @@ the environment or the network, so every rule can be tested with plain in-memory
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import timedelta
 from decimal import Decimal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
@@ -17,6 +18,8 @@ from reconciler.models import (
     ErpBin,
     ErpItem,
     ErpItemPrice,
+    ErpSalesOrder,
+    ShopifyOrder,
     ShopifyShop,
     ShopifyVariant,
     SkippedCheck,
@@ -351,6 +354,69 @@ def _stock_skip_reason(
     if erp_qty != erp_qty.to_integral_value():
         return "ERPNext quantity is fractional; Shopify counts whole units."
     return None
+
+
+# --- Orders --------------------------------------------------------------------------------
+
+ORDER_CHECK_DISABLED = (
+    "Order reconciliation disabled: ERPNEXT_ORDER_ID_FIELD is not configured or the field "
+    "does not exist on ERPNext Sales Order. The tool does not create it."
+)
+SUBMITTED = 1
+"""ERPNext docstatus of a submitted document; only these count as a match."""
+_DOCSTATUS_LABELS = {0: "draft", 2: "cancelled"}
+
+
+def is_eligible_order(order: ShopifyOrder, options: ReconcileOptions) -> bool:
+    since = options.as_of - timedelta(days=options.order_lookback_days)
+    return (
+        order.created_at >= since
+        and order.financial_status == "PAID"
+        and not order.cancelled
+        and not order.test
+    )
+
+
+def check_orders(
+    orders: Iterable[ShopifyOrder],
+    sales_orders: Iterable[ErpSalesOrder] | None,
+    options: ReconcileOptions,
+) -> Findings:
+    if sales_orders is None:
+        return Findings(
+            skipped=[SkippedCheck(check=CheckName.ORDER, key=None, reason=ORDER_CHECK_DISABLED)],
+            warnings=[ORDER_CHECK_DISABLED],
+        )
+    statuses: dict[str, set[int]] = {}
+    for sales_order in sales_orders:
+        order_id = (sales_order.shopify_order_id or "").strip()
+        if order_id:
+            statuses.setdefault(order_id, set()).add(sales_order.docstatus)
+
+    findings = Findings()
+    eligible = sorted(
+        (o for o in orders if is_eligible_order(o, options)), key=lambda o: o.created_at
+    )
+    for order in eligible:
+        found = statuses.get(order.order_id, set())
+        if SUBMITTED not in found:
+            findings.discrepancies.append(_order_not_in_erp(order.order_id, found))
+    return findings
+
+
+def _order_not_in_erp(order_id: str, docstatuses: set[int]) -> Discrepancy:
+    others = sorted(_DOCSTATUS_LABELS.get(status, f"docstatus {status}") for status in docstatuses)
+    detail = f"only {' and '.join(others)} Sales Order(s) found" if others else ""
+    return Discrepancy(
+        type=DiscrepancyType.ORDER_NOT_IN_ERP,
+        key=order_id,
+        source_of_truth=System.SHOPIFY,
+        suggested_action=(
+            "Create (or submit) the ERPNext Sales Order for this Shopify order and store "
+            "the order GID in the mapping field."
+        ),
+        detail=detail,
+    )
 
 
 def _label(system: System) -> str:
