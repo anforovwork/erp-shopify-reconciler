@@ -99,9 +99,12 @@ and in one of the configured Item Groups (`ERPNEXT_ITEM_GROUPS`). Items outside 
 `scope`) with the exclusion reasons, not reported as `MISSING_IN_ERP`.
 
 **Prices.** One configured Selling Price List. An Item Price row is *applicable* when it is on that list,
-has no customer and no batch, has a UOM equal to the item's stock UOM, and is valid on the run date
-(`valid_from` / `valid_upto`, both inclusive, empty = open). Zero applicable rows → `PRICE_MISSING`;
-more than one → `PRICE_AMBIGUOUS`. Mismatch when `|shopify − erp| > 0.01` (exactly 0.01 is fine).
+has no customer and no batch, has `packing_unit` 0 or 1 (ERPNext uses larger pack sizes only for
+multiples), has a UOM equal to the item's stock UOM, and is valid on the run date (`valid_from` /
+`valid_upto`, both inclusive, empty = open). A row that fits every rule but has **no UOM** →
+`PRICE_UOM_MISSING` and no other price check for that SKU (ERPNext v16 requires the UOM, but its own
+lookup treats an empty UOM as matching any UOM, so applicability is unclear). Otherwise zero applicable
+rows → `PRICE_MISSING`; more than one → `PRICE_AMBIGUOUS`. Mismatch when `|shopify − erp| > 0.01` (exactly 0.01 is fine).
 `Decimal` everywhere, including JSON parsing. No currency conversion: if the Shopify store currency,
 the price list currency and `CURRENCY` are not all equal, that is a configuration error.
 Tax: prices are compared only when `ERPNEXT_PRICES_INCLUDE_TAX` is set and equals Shopify's
@@ -134,6 +137,7 @@ Data quality (reported in their own section, but they are discrepancies and coun
 - `SKU_DUPLICATE` — the same SKU appears more than once in one system
 - `PRICE_MISSING` — matched item has no applicable ERPNext price
 - `PRICE_AMBIGUOUS` — matched item has more than one applicable ERPNext price
+- `PRICE_UOM_MISSING` — an otherwise applicable ERPNext price row has no UOM
 
 Each discrepancy records: type, SKU/order id, value in each system, which system is the source of truth,
 and a suggested action (text only — the tool never fixes anything itself). Checks that could not run are

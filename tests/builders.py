@@ -67,6 +67,7 @@ def price(code: str, rate: str = "10.00", **overrides: object) -> ErpItemPrice:
         "batch_no": None,
         "valid_from": None,
         "valid_upto": None,
+        "packing_unit": 0,
     }
     return ErpItemPrice.model_validate(fields | overrides)
 
