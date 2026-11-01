@@ -6,10 +6,11 @@ the environment or the network, so every rule can be tested with plain in-memory
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from reconciler.models import (
     CheckName,
@@ -27,7 +28,12 @@ from reconciler.models import (
     ShopifyVariant,
     SkippedCheck,
     System,
+    TimezoneName,
+    UtcDatetime,
 )
+
+MAX_ORDER_LOOKBACK_DAYS = 60
+"""read_orders only exposes the last 60 days; v1 does not request read_all_orders."""
 
 PRICE_TOLERANCE = Decimal("0.01")
 """A price difference must be strictly greater than this to count as a mismatch."""
@@ -42,15 +48,21 @@ class ReconcileOptions(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    as_of: AwareDatetime
-    """Run time. Price validity uses as_of.date(); the order lookback counts back from it."""
+    as_of: UtcDatetime
+    """Run time (stored in UTC). The order lookback counts back from it."""
+    price_timezone: TimezoneName
+    """ERPNext site timezone; price validity uses the run date in this timezone."""
     item_groups: frozenset[str] = Field(min_length=1)
     price_list: str
     currency: str
     erp_prices_include_tax: bool | None
     warehouse: str
     unit_uoms: frozenset[str] = Field(min_length=1)
-    order_lookback_days: int = Field(gt=0)
+    order_lookback_days: int = Field(gt=0, le=MAX_ORDER_LOOKBACK_DAYS)
+
+    @property
+    def price_date(self) -> date:
+        return self.as_of.astimezone(ZoneInfo(self.price_timezone)).date()
 
 
 @dataclass
@@ -267,7 +279,7 @@ def tax_treatment_matches(shop: ShopifyShop, options: ReconcileOptions) -> bool:
 def price_row_fits(price: ErpItemPrice, item: ErpItem, options: ReconcileOptions) -> bool:
     """Every applicability rule except UOM. packing_unit 0 or 1 is what ERPNext uses for a
     quantity of one (other values only apply to multiples of the pack size)."""
-    run_date = options.as_of.date()
+    run_date = options.price_date
     return (
         price.item_code == item.item_code
         and price.price_list == options.price_list

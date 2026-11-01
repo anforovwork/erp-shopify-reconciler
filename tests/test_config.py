@@ -24,6 +24,7 @@ VALID_ENV = {
     "ERPNEXT_ITEM_GROUPS": "Test Products, Test Gifts ,",
     "ERPNEXT_UNIT_UOMS": "Nos",
     "CURRENCY": "CAD",
+    "ERPNEXT_TIMEZONE": "America/Edmonton",
 }
 
 
@@ -67,6 +68,9 @@ def test_secrets_never_appear_in_repr_or_dump(env: pytest.MonkeyPatch) -> None:
         ("ERPNEXT_ORDER_ID_FIELD", "x; drop"),
         ("CURRENCY", "cad"),
         ("ORDER_LOOKBACK_DAYS", "0"),
+        ("ORDER_LOOKBACK_DAYS", "61"),
+        ("ERPNEXT_TIMEZONE", "Mars/Olympus_Mons"),
+        ("ERPNEXT_TIMEZONE", ""),
     ],
 )
 def test_invalid_values_are_configuration_errors(
@@ -120,6 +124,7 @@ def test_settings_become_reconcile_options(env: pytest.MonkeyPatch) -> None:
     assert opts.warehouse == "Test Stores - TC"
     assert opts.erp_prices_include_tax is False
     assert opts.order_lookback_days == 30
+    assert opts.price_timezone == "America/Edmonton"
 
 
 def test_env_example_is_complete_and_loads(env: pytest.MonkeyPatch) -> None:

@@ -1,8 +1,9 @@
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from builders import AS_OF, day, item, options, order, price, sales_order, stock_bin, variant
+from pydantic import ValidationError
 
 from reconciler.models import (
     CheckName,
@@ -264,6 +265,31 @@ def test_non_applicable_price_rows_are_ignored(not_applicable: ErpItemPrice) -> 
     findings = _price_findings("10.00", [price("SKU-1", "10.00"), not_applicable])
 
     assert findings.discrepancies == []
+
+
+@pytest.mark.parametrize(
+    ("price_timezone", "applies"), [("America/Edmonton", True), ("UTC", False)]
+)
+def test_price_validity_uses_the_configured_timezone(price_timezone: str, applies: bool) -> None:
+    # 03:00 UTC on Nov 2 is still the evening of Nov 1 in Edmonton (UTC-7).
+    late_evening = datetime(2026, 11, 2, 3, 0, tzinfo=UTC)
+    last_day = date(2026, 11, 1)
+    shopify = index_shopify_variants([variant("SKU-1")])
+    opts = options(as_of=late_evening, price_timezone=price_timezone)
+    erp = index_erp_items([item("SKU-1")], opts)
+    shop = ShopifyShop(currency="CAD", taxes_included=False)
+
+    findings = check_prices(
+        match_products(shopify, erp), [price("SKU-1", valid_upto=last_day)], shop, opts
+    )
+
+    assert (findings.discrepancies == []) is applies
+
+
+@pytest.mark.parametrize("days", [0, 61])
+def test_order_lookback_must_be_between_1_and_60_days(days: int) -> None:
+    with pytest.raises(ValidationError):
+        options(order_lookback_days=days)
 
 
 def test_validity_dates_are_inclusive() -> None:
