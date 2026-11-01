@@ -20,6 +20,7 @@ from reconciler.reconcile import (
 )
 
 CommaSeparated = Annotated[frozenset[str], NoDecode]
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
 
 
 class Settings(BaseSettings):
@@ -56,6 +57,14 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return frozenset(part.strip() for part in value.split(",") if part.strip())
         return value
+
+    @field_validator("erpnext_url")
+    @classmethod
+    def _https_unless_local(cls, url: HttpUrl) -> HttpUrl:
+        """API keys travel in a header on every request, so plain HTTP is only for this machine."""
+        if url.scheme != "https" and url.host not in LOCAL_HOSTS:
+            raise ValueError("must use https:// unless the host is localhost")
+        return url
 
     @field_validator("erpnext_database")
     @classmethod

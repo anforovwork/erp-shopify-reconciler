@@ -65,6 +65,8 @@ def test_secrets_never_appear_in_repr_or_dump(env: pytest.MonkeyPatch) -> None:
         ("SHOPIFY_API_VERSION", "2026-08"),
         ("SHOPIFY_LOCATION_ID", "123"),
         ("ERPNEXT_URL", "localhost"),
+        ("ERPNEXT_URL", "http://erp.example.test"),
+        ("ERPNEXT_URL", "http://localhost.example.test"),
         ("ERPNEXT_ITEM_GROUPS", " , "),
         ("ERPNEXT_ORDER_ID_FIELD", "x; drop"),
         ("CURRENCY", "cad"),
@@ -83,6 +85,23 @@ def test_invalid_values_are_configuration_errors(
 
     with pytest.raises(ConfigurationError, match=name):
         load_settings(env_file=None)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://[::1]:8080",
+        "https://erp.example.test",
+    ],
+)
+def test_erpnext_url_is_https_or_local(env: pytest.MonkeyPatch, url: str) -> None:
+    env.setenv("ERPNEXT_URL", url)
+
+    assert load_settings(env_file=None).erpnext_url.host in (
+        "localhost", "127.0.0.1", "[::1]", "::1", "erp.example.test"
+    )  # fmt: skip
 
 
 def test_postgresql_is_refused_with_a_reason(env: pytest.MonkeyPatch) -> None:
