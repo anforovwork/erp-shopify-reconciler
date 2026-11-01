@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from reconciler.models import (
     CheckName,
+    CurrencyCode,
     Discrepancy,
     DiscrepancyType,
     ErpBin,
@@ -54,7 +55,7 @@ class ReconcileOptions(BaseModel):
     """ERPNext site timezone; price validity uses the run date in this timezone."""
     item_groups: frozenset[str] = Field(min_length=1)
     price_list: str
-    currency: str
+    currency: CurrencyCode
     erp_prices_include_tax: bool | None
     warehouse: str
     unit_uoms: frozenset[str] = Field(min_length=1)
