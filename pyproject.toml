@@ -12,7 +12,7 @@ license = { text = "MIT" }
 dependencies = [
   "httpx>=0.28,<1",
   "pydantic>=2.7,<3",
-  "pydantic-settings>=2.3,<3",
+  "pydantic-settings>=2.7,<3",  # 2.7 adds NoDecode (comma-separated lists)
   "mcp>=2.3,<3",
 ]
 
