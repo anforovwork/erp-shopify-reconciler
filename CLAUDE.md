@@ -68,9 +68,10 @@ src/reconciler/
   cli.py             # `reconcile run`, `reconcile report`
   mcp_server.py      # read-only MCP tools
 tests/
-  fixtures/          # fake JSON responses from both systems
-  test_reconcile.py
-  test_sources.py
+  fixtures/          # fake JSON API responses from both systems (client tests)
+  builders.py        # generated in-memory test records (all values fake)
+  test_models.py, test_reconcile.py, test_reconcile_end_to_end.py,
+  test_report.py, test_config.py, test_sources.py
 docs/
   architecture.md
   data-dictionary.md # what every field means and which system owns it
@@ -109,7 +110,8 @@ multiples), has a UOM equal to the item's stock UOM, and is valid on the run dat
 (the ERPNext site timezone; `America/Edmonton` in development). All stored timestamps are UTC. A row that fits every rule but has **no UOM** →
 `PRICE_UOM_MISSING` and no other price check for that SKU (ERPNext v16 requires the UOM, but its own
 lookup treats an empty UOM as matching any UOM, so applicability is unclear). Otherwise zero applicable
-rows → `PRICE_MISSING`; more than one → `PRICE_AMBIGUOUS`. Mismatch when `|shopify − erp| > 0.01` (exactly 0.01 is fine).
+rows → `PRICE_MISSING`; more than one → `PRICE_AMBIGUOUS`. Mismatch when `|shopify − erp| > 0.01`
+(exactly 0.01 is fine).
 `Decimal` everywhere, including JSON parsing. No currency conversion: if the Shopify store currency,
 the price list currency and `CURRENCY` are not all equal, that is a configuration error.
 Tax: prices are compared only when `ERPNEXT_PRICES_INCLUDE_TAX` is set and equals Shopify's
@@ -144,7 +146,7 @@ Comparison:
 - `ORDER_NOT_IN_ERP` — eligible Shopify order has no submitted ERPNext Sales Order with its GID
 
 Data quality (reported in their own section, but they are discrepancies and count toward exit code 1):
-- `SKU_EMPTY` — Shopify variant without a SKU
+- `SKU_EMPTY` — Shopify variant without a SKU (or an ERPNext item code that is blank after trimming)
 - `SKU_DUPLICATE` — the same SKU appears more than once in one system
 - `PRICE_MISSING` — matched item has no applicable ERPNext price
 - `PRICE_AMBIGUOUS` — matched item has more than one applicable ERPNext price
