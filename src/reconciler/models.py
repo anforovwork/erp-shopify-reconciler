@@ -10,7 +10,14 @@ from enum import StrEnum
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, BeforeValidator, ConfigDict
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    StringConstraints,
+)
 
 
 def _reject_float(value: object) -> object:
@@ -42,6 +49,9 @@ def _known_timezone(name: str) -> str:
 TimezoneName = Annotated[str, AfterValidator(_known_timezone)]
 """An IANA timezone name such as America/Edmonton."""
 
+CurrencyCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
+"""ISO 4217 code. Strict, so external text cannot reach error messages through it."""
+
 
 class _Record(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -56,7 +66,7 @@ class System(StrEnum):
 
 
 class ShopifyShop(_Record):
-    currency: str
+    currency: CurrencyCode
     taxes_included: bool
 
 
@@ -126,7 +136,7 @@ class ErpSalesOrder(_Record):
 
 class ErpData(_Record):
     fetched_at: UtcDatetime
-    price_list_currency: str
+    price_list_currency: CurrencyCode
     items: tuple[ErpItem, ...]
     prices: tuple[ErpItemPrice, ...]
     bins: tuple[ErpBin, ...]
@@ -193,7 +203,6 @@ class Discrepancy(_Record):
 
 
 class CheckName(StrEnum):
-    SKU = "sku"
     SCOPE = "scope"
     PRICE = "price"
     STOCK = "stock"
