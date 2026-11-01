@@ -7,7 +7,7 @@ import pytest
 from builders import AS_OF, item, options, order, price, sales_order, stock_bin, variant
 
 from reconciler.models import CheckName, DiscrepancyType, ErpData, ShopifyData, ShopifyShop
-from reconciler.reconcile import ConfigurationError, reconcile
+from reconciler.reconcile import NO_BIN_UNCONFIRMED, ConfigurationError, reconcile
 
 SHOPIFY_FETCHED = AS_OF - timedelta(minutes=2)
 ERP_FETCHED = AS_OF - timedelta(minutes=1)
@@ -32,7 +32,9 @@ def _shopify(currency: str = "CAD") -> ShopifyData:
     )
 
 
-def _erp(sales_orders: tuple | None = (sales_order(1),)) -> ErpData:
+def _erp(
+    sales_orders: tuple | None = (sales_order(1),), warehouse_confirmed: bool = True
+) -> ErpData:
     codes = ["OK-1", "PRICE-1", "STOCK-1", "ONLY-ERP", "DUP-1", "UNTRACKED-1"]
     return ErpData(
         fetched_at=ERP_FETCHED,
@@ -44,6 +46,8 @@ def _erp(sales_orders: tuple | None = (sales_order(1),)) -> ErpData:
         ),
         prices=tuple(price(code) for code in codes if code != "STOCK-1"),
         bins=tuple(stock_bin(code, "5") for code in codes),
+        warehouse_confirmed=warehouse_confirmed,
+        bins_complete=True,
         sales_orders=sales_orders,
     )
 
@@ -84,6 +88,8 @@ def test_clean_data_has_no_discrepancies() -> None:
         items=(item("OK-1"),),
         prices=(price("OK-1"),),
         bins=(stock_bin("OK-1", "5"),),
+        warehouse_confirmed=True,
+        bins_complete=True,
         sales_orders=(sales_order(1),),
     )
 
@@ -99,6 +105,24 @@ def test_without_order_mapping_field_orders_are_skipped_with_warning() -> None:
     assert DiscrepancyType.ORDER_NOT_IN_ERP not in {d.type for d in result.discrepancies}
     assert (CheckName.ORDER, None) in [(s.check, s.key) for s in result.skipped]
     assert len(result.warnings) == 1
+
+
+@pytest.mark.parametrize(("warehouse_confirmed", "bins_complete"), [(False, True), (True, False)])
+def test_unconfirmed_bin_data_never_turns_into_zero_stock(
+    warehouse_confirmed: bool, bins_complete: bool
+) -> None:
+    erp = ErpData.model_validate(
+        _erp().model_dump()
+        | {"bins": (), "warehouse_confirmed": warehouse_confirmed, "bins_complete": bins_complete}
+    )
+
+    result = reconcile(_shopify(), erp, options())
+
+    assert DiscrepancyType.STOCK_MISMATCH not in {d.type for d in result.discrepancies}
+    stock_skips = [(s.key, s.reason) for s in result.skipped if s.check is CheckName.STOCK]
+    assert stock_skips == [
+        (sku, NO_BIN_UNCONFIRMED) for sku in ("OK-1", "PRICE-1", "STOCK-1", "UNTRACKED-1")
+    ]
 
 
 def test_currency_mismatch_stops_the_run() -> None:

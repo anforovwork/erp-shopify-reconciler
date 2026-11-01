@@ -11,7 +11,7 @@ The full v1 rules are in [CLAUDE.md](../CLAUDE.md#reconciliation-rules-v1-decide
 | Price | `ProductVariant.price` | `Item Price.price_list_rate` | ERPNext | `Decimal`; mismatch when difference > 0.01. Only applicable rows (see below) |
 | Currency | `Shop.currencyCode` | `Price List.currency` | — | Must both equal `CURRENCY`, else configuration error. No conversion |
 | Tax treatment | `Shop.taxesIncluded` | `ERPNEXT_PRICES_INCLUDE_TAX` (config) | — | Prices compared only when both are known and equal |
-| Stock | `InventoryLevel.quantities(names: ["on_hand"])` at `SHOPIFY_LOCATION_ID` | `Bin.actual_qty` in `ERPNEXT_WAREHOUSE` | ERPNext | Physical quantity. No Bin row = 0. Fractional ERPNext qty → skipped |
+| Stock | `InventoryLevel.quantities(names: ["on_hand"])` at `SHOPIFY_LOCATION_ID` | `Bin.actual_qty` in `ERPNEXT_WAREHOUSE` | ERPNext | Physical quantity. No Bin row = 0 only if the warehouse was confirmed and all Bin pages were retrieved; otherwise skipped. Fractional ERPNext qty → skipped |
 | Inventory tracked | `InventoryItem.tracked` | — | — | Untracked variants → stock check skipped |
 | Order id | `Order.id` (GID, `gid://shopify/Order/…`) | Sales Order custom field named by `ERPNEXT_ORDER_ID_FIELD` | Shopify | Only submitted Sales Orders (`docstatus = 1`) match |
 
