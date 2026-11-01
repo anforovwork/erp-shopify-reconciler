@@ -1,15 +1,20 @@
-import pytest
-from builders import item, options, variant
+from decimal import Decimal
 
-from reconciler.models import DiscrepancyType, ErpItem
+import pytest
+from builders import day, item, options, price, variant
+
+from reconciler.models import CheckName, DiscrepancyType, ErpItem, ErpItemPrice, ShopifyShop, System
 from reconciler.reconcile import (
+    ConfigurationError,
     check_missing,
+    check_prices,
     check_sku_quality,
     index_erp_items,
     index_shopify_variants,
     is_in_scope,
     match_products,
     normalize_sku,
+    validate_currencies,
 )
 
 
@@ -132,3 +137,134 @@ def test_shopify_sku_whose_erp_item_is_out_of_scope_is_missing_in_erp() -> None:
     erp = index_erp_items([item("SKU-1", disabled=True)], options())
 
     assert _types(check_missing(shopify, erp)) == [(DiscrepancyType.MISSING_IN_ERP, "SKU-1")]
+
+
+# --- Prices --------------------------------------------------------------------------------
+
+
+def _price_findings(
+    shopify_price: str,
+    erp_prices: list,
+    taxes_included: bool = False,
+    **option_overrides: object,
+):
+    shopify = index_shopify_variants([variant("SKU-1", price=Decimal(shopify_price))])
+    erp = index_erp_items([item("SKU-1")], options())
+    shop = ShopifyShop(currency="CAD", taxes_included=taxes_included)
+    return check_prices(match_products(shopify, erp), erp_prices, shop, options(**option_overrides))
+
+
+def test_equal_prices_match() -> None:
+    findings = _price_findings("10.00", [price("SKU-1", "10.00")])
+
+    assert findings.discrepancies == []
+    assert findings.skipped == []
+
+
+@pytest.mark.parametrize(
+    ("shopify_price", "erp_price", "mismatch"),
+    [
+        ("10.00", "10.01", False),  # exactly 0.01 is acceptable
+        ("10.01", "10.00", False),
+        ("10.00", "10.011", True),  # strictly greater than 0.01
+        ("10.00", "9.98", True),
+        ("19.99", "21.10", True),
+    ],
+)
+def test_price_tolerance_is_strictly_greater_than_one_cent(
+    shopify_price: str, erp_price: str, mismatch: bool
+) -> None:
+    findings = _price_findings(shopify_price, [price("SKU-1", erp_price)])
+
+    assert bool(findings.discrepancies) is mismatch
+    if mismatch:
+        found = findings.discrepancies[0]
+        assert found.type is DiscrepancyType.PRICE_MISMATCH
+        assert (found.shopify_value, found.erp_value) == (
+            Decimal(shopify_price),
+            Decimal(erp_price),
+        )
+        assert found.source_of_truth is System.ERPNEXT
+
+
+@pytest.mark.parametrize(
+    "not_applicable",
+    [
+        price("SKU-1", "99.00", price_list="Wholesale"),
+        price("SKU-1", "99.00", customer="TEST-CUSTOMER"),
+        price("SKU-1", "99.00", batch_no="TEST-BATCH"),
+        price("SKU-1", "99.00", uom="Box"),
+        price("SKU-1", "99.00", uom=None),
+        price("SKU-1", "99.00", valid_from=day(1)),
+        price("SKU-1", "99.00", valid_upto=day(-1)),
+    ],
+)
+def test_non_applicable_price_rows_are_ignored(not_applicable: ErpItemPrice) -> None:
+    findings = _price_findings("10.00", [price("SKU-1", "10.00"), not_applicable])
+
+    assert findings.discrepancies == []
+
+
+def test_validity_dates_are_inclusive() -> None:
+    findings = _price_findings(
+        "10.00", [price("SKU-1", "10.00", valid_from=day(0), valid_upto=day(0))]
+    )
+
+    assert findings.discrepancies == []
+
+
+def test_no_applicable_price_is_price_missing() -> None:
+    findings = _price_findings("10.00", [price("SKU-1", "10.00", customer="TEST-CUSTOMER")])
+
+    assert [d.type for d in findings.discrepancies] == [DiscrepancyType.PRICE_MISSING]
+
+
+def test_several_applicable_prices_are_ambiguous() -> None:
+    findings = _price_findings("10.00", [price("SKU-1", "10.00"), price("SKU-1", "12.00")])
+
+    [found] = findings.discrepancies
+    assert found.type is DiscrepancyType.PRICE_AMBIGUOUS
+    assert found.detail == "2 applicable price rows"
+
+
+@pytest.mark.parametrize(
+    ("erp_prices_include_tax", "taxes_included"),
+    [(None, False), (True, False), (False, True)],
+)
+def test_price_comparison_unsupported_when_tax_treatment_unconfirmed(
+    erp_prices_include_tax: bool | None, taxes_included: bool
+) -> None:
+    findings = _price_findings(
+        "10.00",
+        [price("SKU-1", "15.00")],
+        taxes_included=taxes_included,
+        erp_prices_include_tax=erp_prices_include_tax,
+    )
+
+    assert findings.discrepancies == []  # no false PRICE_MISMATCH
+    [skipped] = findings.skipped
+    assert (skipped.check, skipped.key) == (CheckName.PRICE, None)
+
+
+def test_tax_included_on_both_sides_is_compared() -> None:
+    findings = _price_findings(
+        "10.00", [price("SKU-1", "15.00")], taxes_included=True, erp_prices_include_tax=True
+    )
+
+    assert [d.type for d in findings.discrepancies] == [DiscrepancyType.PRICE_MISMATCH]
+
+
+def test_missing_price_is_still_reported_when_comparison_unsupported() -> None:
+    findings = _price_findings("10.00", [], erp_prices_include_tax=None)
+
+    assert [d.type for d in findings.discrepancies] == [DiscrepancyType.PRICE_MISSING]
+
+
+def test_matching_currencies_are_valid() -> None:
+    validate_currencies("CAD", "CAD", "CAD")
+
+
+@pytest.mark.parametrize(("shop", "price_list"), [("USD", "CAD"), ("CAD", "USD"), ("cad", "CAD")])
+def test_currency_mismatch_is_a_configuration_error(shop: str, price_list: str) -> None:
+    with pytest.raises(ConfigurationError, match="Currency mismatch"):
+        validate_currencies(shop, price_list, "CAD")

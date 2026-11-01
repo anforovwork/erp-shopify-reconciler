@@ -6,17 +6,28 @@ the environment or the network, so every rule can be tested with plain in-memory
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from reconciler.models import (
+    CheckName,
     Discrepancy,
     DiscrepancyType,
     ErpItem,
+    ErpItemPrice,
+    ShopifyShop,
     ShopifyVariant,
     SkippedCheck,
     System,
 )
+
+PRICE_TOLERANCE = Decimal("0.01")
+"""A price difference must be strictly greater than this to count as a mismatch."""
+
+
+class ConfigurationError(Exception):
+    """Settings or system configuration make a reliable comparison impossible."""
 
 
 class ReconcileOptions(BaseModel):
@@ -185,6 +196,114 @@ def check_missing(shopify: SkuIndex[ShopifyVariant], erp: SkuIndex[ErpItem]) -> 
         for sku in missing_in_erp
     ]
     return findings
+
+
+# --- Prices --------------------------------------------------------------------------------
+
+
+def validate_currencies(shop_currency: str, price_list_currency: str, configured: str) -> None:
+    """No currency conversion in v1: all three must be equal, otherwise stop."""
+    wrong = [
+        f"{source} uses {currency}"
+        for source, currency in (
+            ("the Shopify store", shop_currency),
+            ("the ERPNext price list", price_list_currency),
+        )
+        if currency != configured
+    ]
+    if wrong:
+        raise ConfigurationError(
+            f"Currency mismatch: CURRENCY is {configured}, but {' and '.join(wrong)}. "
+            "Currency conversion is not supported."
+        )
+
+
+def tax_treatment_matches(shop: ShopifyShop, options: ReconcileOptions) -> bool:
+    return options.erp_prices_include_tax is not None and (
+        options.erp_prices_include_tax == shop.taxes_included
+    )
+
+
+def is_applicable_price(price: ErpItemPrice, item: ErpItem, options: ReconcileOptions) -> bool:
+    run_date = options.as_of.date()
+    return (
+        price.item_code == item.item_code
+        and price.price_list == options.price_list
+        and not price.customer
+        and not price.batch_no
+        and price.uom == item.stock_uom
+        and (price.valid_from is None or price.valid_from <= run_date)
+        and (price.valid_upto is None or run_date <= price.valid_upto)
+    )
+
+
+def check_prices(
+    matched: dict[str, MatchedProduct],
+    prices: Iterable[ErpItemPrice],
+    shop: ShopifyShop,
+    options: ReconcileOptions,
+) -> Findings:
+    findings = Findings()
+    compare = tax_treatment_matches(shop, options)
+    if not compare:
+        findings.skipped.append(
+            SkippedCheck(
+                check=CheckName.PRICE,
+                key=None,
+                reason=(
+                    "Price comparison unsupported: ERPNEXT_PRICES_INCLUDE_TAX is not set or "
+                    "does not match Shopify's taxesIncluded setting. Missing and ambiguous "
+                    "prices are still checked."
+                ),
+            )
+        )
+    prices_by_code: dict[str, list[ErpItemPrice]] = {}
+    for price in prices:
+        prices_by_code.setdefault(price.item_code, []).append(price)
+
+    for sku, product in matched.items():
+        candidates = prices_by_code.get(product.item.item_code, [])
+        applicable = [p for p in candidates if is_applicable_price(p, product.item, options)]
+        finding = _price_finding(sku, product.variant.price, applicable, compare)
+        if finding:
+            findings.discrepancies.append(finding)
+    return findings
+
+
+def _price_finding(
+    sku: str, shopify_price: Decimal, applicable: list[ErpItemPrice], compare: bool
+) -> Discrepancy | None:
+    if not applicable:
+        return Discrepancy(
+            type=DiscrepancyType.PRICE_MISSING,
+            key=sku,
+            shopify_value=shopify_price,
+            source_of_truth=System.ERPNEXT,
+            suggested_action=(
+                "Add one Item Price on the configured selling price list (stock UOM, no customer, "
+                "no batch, valid today)."
+            ),
+        )
+    if len(applicable) > 1:
+        return Discrepancy(
+            type=DiscrepancyType.PRICE_AMBIGUOUS,
+            key=sku,
+            shopify_value=shopify_price,
+            source_of_truth=System.ERPNEXT,
+            suggested_action="Keep exactly one applicable Item Price on the selling price list.",
+            detail=f"{len(applicable)} applicable price rows",
+        )
+    erp_price = applicable[0].price_list_rate
+    if compare and abs(shopify_price - erp_price) > PRICE_TOLERANCE:
+        return Discrepancy(
+            type=DiscrepancyType.PRICE_MISMATCH,
+            key=sku,
+            shopify_value=shopify_price,
+            erp_value=erp_price,
+            source_of_truth=System.ERPNEXT,
+            suggested_action="Update the Shopify price to the ERPNext price.",
+        )
+    return None
 
 
 def _label(system: System) -> str:
