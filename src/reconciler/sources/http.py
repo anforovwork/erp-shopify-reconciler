@@ -34,6 +34,10 @@ class ReadOnlyViolation(Exception):
 class SourceError(Exception):
     """The source system answered with an error, or could not be reached after retries."""
 
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class IncompleteResponse(SourceError):
     """A response was malformed or incomplete; partial data is never returned."""
@@ -300,7 +304,8 @@ class ReadOnlyClient:
                 continue
             if not response.is_success:
                 raise SourceError(
-                    f"{_where(response.request)} returned HTTP {response.status_code}"
+                    f"{_where(response.request)} returned HTTP {response.status_code}",
+                    status_code=response.status_code,
                 )
             return parse_json(response)
         raise AssertionError("unreachable")  # pragma: no cover

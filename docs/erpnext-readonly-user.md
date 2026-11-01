@@ -21,12 +21,13 @@ Amend, Import, Export, Print, Email and Share **unticked**.
 
 | DocType | Why the reconciler reads it |
 |---|---|
-| Item | item master, scope filters, stock UOM |
+| Item | item master, scope filters, stock UOM, variant → template |
 | Item Price | selling prices |
-| Price List | price list currency |
+| Price List | must exist, be enabled and selling; its currency |
 | Bin | stock per warehouse |
-| Warehouse | confirm the configured warehouse exists before a missing Bin counts as zero |
+| Warehouse | confirm the configured warehouse exists (and is not a group) before a missing Bin counts as zero |
 | Sales Order | order matching (custom GID field, `docstatus`) |
+| Custom Field | check that the order mapping field exists (only if `ERPNEXT_ORDER_ID_FIELD` is set) |
 
 ## 3. Create the user
 
@@ -34,6 +35,10 @@ Amend, Import, Export, Print, Email and Share **unticked**.
 
 - A system user with a non-personal email, e.g. `reconciler@your-test-domain.example`.
 - Roles: **only** `Reconciler Read Only`. Remove every role ERPNext adds by default.
+- **No User Permission restrictions** (*User Permission* list must be empty for this user).
+  Frappe silently filters list results by User Permissions, so a restricted user would
+  receive data that looks complete but is not — and missing rows would look like
+  missing products, prices or stock.
 
 ## 4. Generate API keys
 

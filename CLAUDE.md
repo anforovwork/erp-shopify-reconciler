@@ -78,10 +78,10 @@ src/reconciler/
   cli.py             # `reconcile run`, `reconcile report`
   mcp_server.py      # read-only MCP tools
 tests/
-  fixtures/          # fake JSON API responses from both systems (client tests)
+  fixtures/          # fake JSON API responses from both systems (client tests), e.g. erpnext/
   builders.py        # generated in-memory test records (all values fake)
   test_models.py, test_reconcile.py, test_reconcile_end_to_end.py,
-  test_report.py, test_config.py, test_http.py, test_sources.py
+  test_report.py, test_config.py, test_http.py, test_erpnext.py
 docs/
   architecture.md
   data-dictionary.md # what every field means and which system owns it

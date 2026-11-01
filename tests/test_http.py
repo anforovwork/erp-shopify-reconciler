@@ -463,6 +463,7 @@ def test_other_errors_fail_immediately(status: int) -> None:
         _erp(recorder).request_json("GET", "/api/resource/Item")
 
     assert str(error.value) == f"GET /api/resource/Item returned HTTP {status}"
+    assert error.value.status_code == status
     assert len(recorder.requests) == 1
 
 

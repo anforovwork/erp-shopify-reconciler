@@ -1,0 +1,7 @@
+{"data": [
+  {"item_code": "TEST-SKU-1", "price_list": "Test Selling", "price_list_rate": 17.5, "uom": "Nos", "customer": null, "supplier": null, "batch_no": null, "valid_from": "2025-01-01", "valid_upto": null, "packing_unit": 0},
+  {"item_code": "TEST-SKU-1", "price_list": "Test Selling", "price_list_rate": 19.99, "uom": "Nos", "customer": null, "supplier": null, "batch_no": null, "valid_from": "2026-10-01", "valid_upto": null, "packing_unit": 0},
+  {"item_code": "TEST-SKU-1", "price_list": "Test Selling", "price_list_rate": 15, "uom": "Nos", "customer": "TEST-CUSTOMER", "supplier": null, "batch_no": null, "valid_from": "2026-10-01", "valid_upto": null, "packing_unit": 0},
+  {"item_code": "TEST-SKU-3", "price_list": "Test Selling", "price_list_rate": 9.95, "uom": "", "customer": null, "supplier": null, "batch_no": null, "valid_from": null, "valid_upto": null, "packing_unit": 0},
+  {"item_code": "TEST-TPL-1", "price_list": "Test Selling", "price_list_rate": 25.0, "uom": null, "customer": null, "supplier": null, "batch_no": null, "valid_from": "2024-06-01", "valid_upto": null, "packing_unit": 0}
+]}
