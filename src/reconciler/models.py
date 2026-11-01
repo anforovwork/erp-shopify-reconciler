@@ -165,6 +165,7 @@ class Discrepancy(_Record):
 
 class CheckName(StrEnum):
     SKU = "sku"
+    SCOPE = "scope"
     PRICE = "price"
     STOCK = "stock"
     ORDER = "order"

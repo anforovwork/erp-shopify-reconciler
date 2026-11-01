@@ -95,7 +95,8 @@ data-quality discrepancies; such SKUs get no other check.
 **ERPNext scope.** Only items that are enabled (`disabled = 0`), sales items (`is_sales_item = 1`),
 stock items (`is_stock_item = 1`, which excludes services), not variant templates (`has_variants = 0`),
 and in one of the configured Item Groups (`ERPNEXT_ITEM_GROUPS`). Items outside this scope never produce
-`MISSING_IN_SHOPIFY`.
+`MISSING_IN_SHOPIFY`. A Shopify SKU whose ERPNext item exists but is out of scope is **skipped** (check
+`scope`) with the exclusion reasons, not reported as `MISSING_IN_ERP`.
 
 **Prices.** One configured Selling Price List. An Item Price row is *applicable* when it is on that list,
 has no customer and no batch, has a UOM equal to the item's stock UOM, and is valid on the run date
@@ -123,7 +124,7 @@ exist, order reconciliation is skipped with a warning — the tool never creates
 
 Comparison:
 - `MISSING_IN_SHOPIFY` — in-scope ERPNext item, not in Shopify
-- `MISSING_IN_ERP` — SKU exists in Shopify, not among in-scope ERPNext items
+- `MISSING_IN_ERP` — SKU exists in Shopify; ERPNext has no item with that code at all
 - `PRICE_MISMATCH` — prices differ by more than 0.01 in the same currency
 - `STOCK_MISMATCH` — Shopify `on_hand` differs from ERPNext `actual_qty`
 - `ORDER_NOT_IN_ERP` — eligible Shopify order has no submitted ERPNext Sales Order with its GID
