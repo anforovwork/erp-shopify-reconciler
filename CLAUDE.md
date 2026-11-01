@@ -123,7 +123,9 @@ timezone; `America/Edmonton` in development). All stored timestamps are UTC.
    open), and a `packing_unit` that fits one unit (0 or 1).
 2. *Precedence* (ERPNext's `ORDER BY`): newest `valid_from` first (a missing `valid_from` ranks last),
    then `uom` descending (stock UOM > `''` > NULL). `valid_upto`, rate, creation time and name are
-   **not** tie-breakers.
+   **not** tie-breakers. This is **MariaDB** ordering (NULL sorts last in DESC). PostgreSQL sorts NULL
+   first, so ERPNext picks differently there: PostgreSQL is **unsupported**, and `ERPNEXT_DATABASE`
+   must be `mariadb` or the tool refuses to run (the read-only API cannot reveal the database type).
 3. *Variant fallback:* if a variant has no candidate row, its template's rows are used (ERPNext v16
    blocks new template prices, but existing ones still apply).
 4. *Result:* one top row → that price is compared (mismatch when `|shopify − erp| > 0.01`; exactly

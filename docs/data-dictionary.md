@@ -40,6 +40,8 @@ or batch, on the run date (calendar day in `ERPNEXT_TIMEZONE`). Details in
 | `valid_from` | empty or ≤ run date | 1st: newest wins; empty ranks last |
 | `valid_upto` | empty or ≥ run date | not a tie-breaker |
 | `creation`, `name`, `price_list_rate` | — | not tie-breakers → a tie is `PRICE_AMBIGUOUS` |
+
+Precedence follows **MariaDB** NULL ordering; PostgreSQL is unsupported (`ERPNEXT_DATABASE` must be `mariadb`).
 | (variant) | no own candidate → the template item's rows (`Item.variant_of`) | same rules |
 
 ## Shopify variants in scope

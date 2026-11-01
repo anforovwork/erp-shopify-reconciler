@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     erpnext_order_id_field: str | None = Field(default=None, pattern=r"^[a-z_][a-z0-9_]*$")
     erpnext_timezone: TimezoneName
     """Must match the ERPNext site timezone (System Settings)."""
+    erpnext_database: str
+    """Database behind the ERPNext site. Only MariaDB is supported (see _mariadb_only)."""
 
     # Reconciliation
     currency: str = Field(pattern=r"^[A-Z]{3}$")
@@ -54,6 +56,19 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return frozenset(part.strip() for part in value.split(",") if part.strip())
         return value
+
+    @field_validator("erpnext_database")
+    @classmethod
+    def _mariadb_only(cls, value: str) -> str:
+        """Price precedence is reproduced for MariaDB, which sorts NULL last in DESC order.
+        PostgreSQL sorts NULL first, so ERPNext would pick different prices there; rather than
+        silently comparing against the wrong price, any other database is refused. The read-only
+        API cannot reveal the database type, so the operator must state it."""
+        if value.strip().lower() != "mariadb":
+            raise ValueError(
+                "only 'mariadb' is supported; ERPNext price selection differs on PostgreSQL"
+            )
+        return "mariadb"
 
     @field_validator("erpnext_prices_include_tax", "erpnext_order_id_field", mode="before")
     @classmethod

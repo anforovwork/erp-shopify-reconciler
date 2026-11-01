@@ -25,6 +25,7 @@ VALID_ENV = {
     "ERPNEXT_UNIT_UOMS": "Nos",
     "CURRENCY": "CAD",
     "ERPNEXT_TIMEZONE": "America/Edmonton",
+    "ERPNEXT_DATABASE": "mariadb",
 }
 
 
@@ -71,6 +72,8 @@ def test_secrets_never_appear_in_repr_or_dump(env: pytest.MonkeyPatch) -> None:
         ("ORDER_LOOKBACK_DAYS", "61"),
         ("ERPNEXT_TIMEZONE", "Mars/Olympus_Mons"),
         ("ERPNEXT_TIMEZONE", ""),
+        ("ERPNEXT_DATABASE", "postgres"),
+        ("ERPNEXT_DATABASE", ""),
     ],
 )
 def test_invalid_values_are_configuration_errors(
@@ -79,6 +82,20 @@ def test_invalid_values_are_configuration_errors(
     env.setenv(name, bad_value)
 
     with pytest.raises(ConfigurationError, match=name):
+        load_settings(env_file=None)
+
+
+def test_postgresql_is_refused_with_a_reason(env: pytest.MonkeyPatch) -> None:
+    env.setenv("ERPNEXT_DATABASE", "postgres")
+
+    with pytest.raises(ConfigurationError, match="differs on PostgreSQL"):
+        load_settings(env_file=None)
+
+
+def test_database_setting_is_required(env: pytest.MonkeyPatch) -> None:
+    env.delenv("ERPNEXT_DATABASE")
+
+    with pytest.raises(ConfigurationError, match="ERPNEXT_DATABASE: Field required"):
         load_settings(env_file=None)
 
 
