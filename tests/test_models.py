@@ -97,6 +97,7 @@ def test_erpnext_integer_flags_become_booleans() -> None:
             "is_sales_item": 1,
             "is_stock_item": 1,
             "has_variants": 0,
+            "variant_of": None,
         }
     )
     assert item.disabled is False

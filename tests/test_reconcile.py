@@ -208,10 +208,11 @@ def _price_findings(
     shopify_price: str,
     erp_prices: list,
     taxes_included: bool = False,
+    erp_item: ErpItem | None = None,
     **option_overrides: object,
-):
+) -> Findings:
     shopify = index_shopify_variants([variant("SKU-1", price=Decimal(shopify_price))])
-    erp = index_erp_items([item("SKU-1")], options())
+    erp = index_erp_items([erp_item or item("SKU-1")], options())
     shop = ShopifyShop(currency="CAD", taxes_included=taxes_included)
     return check_prices(match_products(shopify, erp), erp_prices, shop, options(**option_overrides))
 
@@ -254,6 +255,7 @@ def test_price_tolerance_is_strictly_greater_than_one_cent(
     [
         price("SKU-1", "99.00", price_list="Wholesale"),
         price("SKU-1", "99.00", customer="TEST-CUSTOMER"),
+        price("SKU-1", "99.00", supplier="TEST-SUPPLIER"),
         price("SKU-1", "99.00", batch_no="TEST-BATCH"),
         price("SKU-1", "99.00", uom="Box"),
         price("SKU-1", "99.00", packing_unit=6),  # pack price, not for one unit
@@ -306,27 +308,138 @@ def test_no_applicable_price_is_price_missing() -> None:
     assert [d.type for d in findings.discrepancies] == [DiscrepancyType.PRICE_MISSING]
 
 
-def test_packing_unit_one_applies_to_a_single_unit() -> None:
-    findings = _price_findings("10.00", [price("SKU-1", "10.00", packing_unit=1)])
+# --- ERPNext price selection (reproduces ERPNext v16.53.0, see reconcile.py) ---------------
 
-    assert findings.discrepancies == []
+
+def _types_and_erp_values(findings: Findings) -> list[tuple[DiscrepancyType, Decimal | None]]:
+    return [(d.type, d.erp_value) for d in findings.discrepancies]
+
+
+def test_packing_unit_one_applies_to_a_single_unit() -> None:
+    assert _price_findings("10.00", [price("SKU-1", "10.00", packing_unit=1)]).discrepancies == []
+
+
+def test_only_pack_prices_means_price_missing() -> None:
+    findings = _price_findings("10.00", [price("SKU-1", "10.00", packing_unit=6)])
+
+    assert [d.type for d in findings.discrepancies] == [DiscrepancyType.PRICE_MISSING]
+
+
+def test_newest_valid_from_wins() -> None:
+    erp_prices = [
+        price("SKU-1", "99.00", valid_from=day(-30)),
+        price("SKU-1", "10.00", valid_from=day(-1)),
+    ]
+
+    assert _price_findings("10.00", erp_prices).discrepancies == []
+    assert _types_and_erp_values(_price_findings("99.00", erp_prices)) == [
+        (DiscrepancyType.PRICE_MISMATCH, Decimal("10.00"))
+    ]
+
+
+def test_dated_row_beats_row_without_valid_from() -> None:
+    # MariaDB sorts NULL last in `valid_from DESC`.
+    erp_prices = [price("SKU-1", "99.00", valid_from=None), price("SKU-1", "10.00", day(-400))]
+
+    assert _price_findings("10.00", erp_prices).discrepancies == []
+
+
+def test_price_valid_from_tomorrow_is_not_used_yet() -> None:
+    erp_prices = [price("SKU-1", "10.00", day(-1)), price("SKU-1", "99.00", valid_from=day(1))]
+
+    assert _price_findings("10.00", erp_prices).discrepancies == []
+
+
+@pytest.mark.parametrize(
+    "tied",
+    [
+        # Same valid_from and UOM; differing packing_unit (0 vs 1) passes ERPNext's duplicate check.
+        [price("SKU-1", "10.00", day(-1)), price("SKU-1", "12.00", day(-1), packing_unit=1)],
+        # Both without valid_from (legacy/imported data).
+        [price("SKU-1", "10.00"), price("SKU-1", "12.00")],
+        # valid_upto is not part of ERPNext's ORDER BY, so it does not break the tie.
+        [price("SKU-1", "10.00", day(-1)), price("SKU-1", "12.00", day(-1), valid_upto=day(9))],
+    ],
+)
+def test_rows_tied_on_valid_from_and_uom_are_ambiguous(tied: list[ErpItemPrice]) -> None:
+    findings = _price_findings("50.00", tied)  # would mismatch either row if compared
+
+    [found] = findings.discrepancies
+    assert found.type is DiscrepancyType.PRICE_AMBIGUOUS
+    assert found.erp_value is None
+    assert found.detail.startswith("2 price rows tie on valid_from and UOM")
+
+
+def test_identical_rates_still_tie() -> None:
+    """Which row ERPNext picks is undefined, so the rule does not peek at the rates."""
+    tied = [price("SKU-1", "10.00", day(-1)), price("SKU-1", "10.00", day(-1), packing_unit=1)]
+
+    assert [d.type for d in _price_findings("10.00", tied).discrepancies] == [
+        DiscrepancyType.PRICE_AMBIGUOUS
+    ]
+
+
+def test_tie_with_a_row_that_does_not_fit_one_unit_is_not_a_tie() -> None:
+    erp_prices = [
+        price("SKU-1", "10.00", day(-1)),
+        price("SKU-1", "99.00", day(-1), packing_unit=6),
+    ]
+
+    assert _price_findings("10.00", erp_prices).discrepancies == []
+
+
+def test_input_order_does_not_change_the_selection() -> None:
+    """There is no creation-time tie-breaker in ERPNext; only the precedence key decides."""
+    erp_prices = [price("SKU-1", "99.00", day(-30)), price("SKU-1", "10.00", day(-1))]
+
+    for ordering in (erp_prices, list(reversed(erp_prices))):
+        assert _price_findings("10.00", ordering).discrepancies == []
+
+
+def test_other_uom_rows_are_ignored_even_when_newer() -> None:
+    erp_prices = [price("SKU-1", "10.00", day(-10)), price("SKU-1", "99.00", day(-1), uom="Box")]
+
+    assert _price_findings("10.00", erp_prices).discrepancies == []
 
 
 @pytest.mark.parametrize("unset", [None, "", "  "])
-def test_price_row_without_uom_is_its_own_data_quality_issue(unset: str | None) -> None:
+def test_row_without_uom_is_flagged_and_still_used_by_erpnext(unset: str | None) -> None:
     findings = _price_findings("10.00", [price("SKU-1", "15.00", uom=unset)])
 
-    [found] = findings.discrepancies  # not PRICE_MISSING, and no numeric comparison
-    assert found.type is DiscrepancyType.PRICE_UOM_MISSING
-    assert found.detail == "1 otherwise applicable price row(s) without UOM"
+    assert _types_and_erp_values(findings) == [
+        (DiscrepancyType.PRICE_UOM_MISSING, None),
+        (DiscrepancyType.PRICE_MISMATCH, Decimal("15.00")),
+    ]
+    assert findings.discrepancies[0].detail.startswith("1 applicable price row(s) without UOM")
 
 
-def test_row_without_uom_blocks_comparison_even_next_to_a_valid_row() -> None:
-    findings = _price_findings(
-        "10.00", [price("SKU-1", "99.00"), price("SKU-1", "10.00", uom=None)]
-    )
+def test_stock_uom_row_beats_row_without_uom_on_equal_valid_from() -> None:
+    # `uom DESC`: 'Nos' > '' > NULL.
+    erp_prices = [price("SKU-1", "99.00", day(-1), uom=None), price("SKU-1", "10.00", day(-1))]
 
-    assert [d.type for d in findings.discrepancies] == [DiscrepancyType.PRICE_UOM_MISSING]
+    assert _types_and_erp_values(_price_findings("10.00", erp_prices)) == [
+        (DiscrepancyType.PRICE_UOM_MISSING, None)
+    ]
+
+
+def test_empty_uom_beats_null_uom_on_equal_valid_from() -> None:
+    erp_prices = [
+        price("SKU-1", "99.00", day(-1), uom=None),
+        price("SKU-1", "10.00", day(-1), uom=""),
+    ]
+
+    assert _types_and_erp_values(_price_findings("10.00", erp_prices)) == [
+        (DiscrepancyType.PRICE_UOM_MISSING, None)
+    ]
+
+
+def test_newer_row_without_uom_wins_over_older_stock_uom_row() -> None:
+    erp_prices = [price("SKU-1", "10.00", day(-10)), price("SKU-1", "99.00", day(-1), uom=None)]
+
+    assert _types_and_erp_values(_price_findings("10.00", erp_prices)) == [
+        (DiscrepancyType.PRICE_UOM_MISSING, None),
+        (DiscrepancyType.PRICE_MISMATCH, Decimal("99.00")),
+    ]
 
 
 def test_row_without_uom_that_does_not_otherwise_fit_is_ignored() -> None:
@@ -335,12 +448,34 @@ def test_row_without_uom_that_does_not_otherwise_fit_is_ignored() -> None:
     assert _price_findings("10.00", erp_prices).discrepancies == []
 
 
-def test_several_applicable_prices_are_ambiguous() -> None:
-    findings = _price_findings("10.00", [price("SKU-1", "10.00"), price("SKU-1", "12.00")])
+def test_variant_without_own_price_uses_template_price() -> None:
+    variant_item = item("SKU-1", variant_of="TPL-1")
+    findings = _price_findings("12.00", [price("TPL-1", "10.00")], erp_item=variant_item)
 
     [found] = findings.discrepancies
-    assert found.type is DiscrepancyType.PRICE_AMBIGUOUS
-    assert found.detail == "2 applicable price rows"
+    assert (found.type, found.erp_value) == (DiscrepancyType.PRICE_MISMATCH, Decimal("10.00"))
+    assert found.detail == "ERPNext price inherited from the template item"
+
+
+def test_variant_own_price_beats_template_price() -> None:
+    variant_item = item("SKU-1", variant_of="TPL-1")
+    erp_prices = [price("TPL-1", "99.00", day(-1)), price("SKU-1", "10.00", day(-30))]
+
+    assert _price_findings("10.00", erp_prices, erp_item=variant_item).discrepancies == []
+
+
+def test_variant_falls_back_to_template_when_own_rows_do_not_fit_one_unit() -> None:
+    # ERPNext returns no price for the variant (no row fits qty 1), then tries the template.
+    variant_item = item("SKU-1", variant_of="TPL-1")
+    erp_prices = [price("SKU-1", "99.00", packing_unit=6), price("TPL-1", "10.00")]
+
+    assert _price_findings("10.00", erp_prices, erp_item=variant_item).discrepancies == []
+
+
+def test_no_variant_fallback_for_non_variants() -> None:
+    findings = _price_findings("10.00", [price("TPL-1", "10.00")])
+
+    assert [d.type for d in findings.discrepancies] == [DiscrepancyType.PRICE_MISSING]
 
 
 @pytest.mark.parametrize(

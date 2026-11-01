@@ -252,6 +252,23 @@ def check_missing(
 
 
 # --- Prices --------------------------------------------------------------------------------
+#
+# Reproduces ERPNext v16.53.0's selling-price selection (erpnext/stock/get_item_details.py:
+# get_price_list_rate -> get_price_list_rate_for -> get_item_price) for ONE unit in the item's
+# stock UOM, no customer, no batch, on the run date. The SQL it builds (verified on our install):
+#
+#   WHERE item_code = <item> AND price_list = <list> AND IFNULL(uom,'') IN ('', <uom>)
+#     AND IFNULL(batch_no,'') = '' AND IFNULL(customer,'') = '' AND IFNULL(supplier,'') = ''
+#     AND IFNULL(valid_from,'2000-01-01') <= <date> AND IFNULL(valid_upto,'2500-12-31') >= <date>
+#   ORDER BY IFNULL(batch_no,'') DESC, valid_from DESC, uom DESC
+#
+# Python then takes the first row whose packing_unit fits the quantity. If the item has no such
+# row and is a variant, the same lookup runs for its template. There is no tie-breaker after
+# `uom` (not creation, modified or name), so rows that tie on (valid_from, uom) come back in an
+# order the database does not define: ERPNext's choice is not reproducible -> PRICE_AMBIGUOUS.
+
+QUANTITY = 1
+"""Shopify sells one unit at the variant price, so the lookup uses quantity 1."""
 
 
 def validate_currencies(shop_currency: str, price_list_currency: str, configured: str) -> None:
@@ -277,29 +294,85 @@ def tax_treatment_matches(shop: ShopifyShop, options: ReconcileOptions) -> bool:
     )
 
 
-def price_row_fits(price: ErpItemPrice, item: ErpItem, options: ReconcileOptions) -> bool:
-    """Every applicability rule except UOM. packing_unit 0 or 1 is what ERPNext uses for a
-    quantity of one (other values only apply to multiples of the pack size)."""
+def _blank(value: str | None) -> bool:
+    """IFNULL(x,'') = '' in MariaDB, whose collations ignore trailing spaces."""
+    return not (value or "").strip()
+
+
+def fits_packing_unit(price: ErpItemPrice) -> bool:
+    """ERPNext: `not packing_unit or qty % packing_unit == 0`."""
+    return price.packing_unit == 0 or QUANTITY % price.packing_unit == 0
+
+
+def is_candidate_price(
+    price: ErpItemPrice, item_code: str, uom: str, options: ReconcileOptions
+) -> bool:
     run_date = options.price_date
     return (
-        price.item_code == item.item_code
+        price.item_code == item_code
         and price.price_list == options.price_list
-        and not price.customer
-        and not price.batch_no
-        and price.packing_unit in (0, 1)
+        and (_blank(price.uom) or price.uom == uom)
+        and _blank(price.batch_no)
+        and _blank(price.customer)
+        and _blank(price.supplier)
         and (price.valid_from is None or price.valid_from <= run_date)
         and (price.valid_upto is None or run_date <= price.valid_upto)
+        and fits_packing_unit(price)
     )
 
 
-def is_applicable_price(price: ErpItemPrice, item: ErpItem, options: ReconcileOptions) -> bool:
-    return price_row_fits(price, item, options) and price.uom == item.stock_uom
+def precedence(price: ErpItemPrice) -> tuple[tuple[bool, date], tuple[bool, str]]:
+    """ERPNext's ORDER BY as a sort key; the highest key wins. MariaDB sorts NULL below every
+    value in DESC order, so a missing valid_from or uom ranks last."""
+    valid_from = (price.valid_from is not None, price.valid_from or date.min)
+    uom = (price.uom is not None, (price.uom or "").strip())
+    return valid_from, uom
 
 
-def has_unset_uom(price: ErpItemPrice, item: ErpItem, options: ReconcileOptions) -> bool:
-    """A fitting row without UOM. ERPNext v16 requires the field, yet its own price lookup
-    treats an empty UOM as matching any UOM, so whether it applies is unclear."""
-    return price_row_fits(price, item, options) and not (price.uom or "").strip()
+@dataclass(frozen=True)
+class PriceSelection:
+    selected: ErpItemPrice | None
+    """The row ERPNext would use; None when there is none or the choice is undefined."""
+    tied: tuple[ErpItemPrice, ...] = ()
+    """Rows sharing the top precedence (two or more = ERPNext's choice is undefined)."""
+    without_uom: int = 0
+    """Candidate rows with no UOM (data-quality issue; ERPNext treats them as any UOM)."""
+    from_template: bool = False
+
+
+def select_erp_price(
+    item: ErpItem, prices_by_code: dict[str, list[ErpItemPrice]], options: ReconcileOptions
+) -> PriceSelection:
+    own = _select_for(item.item_code, item.stock_uom, prices_by_code, options)
+    if own is not None or not item.variant_of:
+        return own or PriceSelection(selected=None)
+    template = _select_for(item.variant_of, item.stock_uom, prices_by_code, options)
+    if template is None:
+        return PriceSelection(selected=None)
+    return PriceSelection(
+        selected=template.selected,
+        tied=template.tied,
+        without_uom=template.without_uom,
+        from_template=True,
+    )
+
+
+def _select_for(
+    code: str, uom: str, prices_by_code: dict[str, list[ErpItemPrice]], options: ReconcileOptions
+) -> PriceSelection | None:
+    """None = no candidate row at all (ERPNext then returns no price for this code)."""
+    candidates = [
+        p for p in prices_by_code.get(code, []) if is_candidate_price(p, code, uom, options)
+    ]
+    if not candidates:
+        return None
+    best = max(precedence(p) for p in candidates)
+    top = tuple(p for p in candidates if precedence(p) == best)
+    return PriceSelection(
+        selected=top[0] if len(top) == 1 else None,
+        tied=top if len(top) > 1 else (),
+        without_uom=sum(_blank(p.uom) for p in candidates),
+    )
 
 
 def check_prices(
@@ -327,64 +400,72 @@ def check_prices(
         prices_by_code.setdefault(price.item_code, []).append(price)
 
     for sku, product in matched.items():
-        candidates = prices_by_code.get(product.item.item_code, [])
-        unset_uom = [p for p in candidates if has_unset_uom(p, product.item, options)]
-        applicable = [p for p in candidates if is_applicable_price(p, product.item, options)]
-        finding = _price_finding(sku, product.variant.price, applicable, unset_uom, compare)
-        if finding:
-            findings.discrepancies.append(finding)
+        selection = select_erp_price(product.item, prices_by_code, options)
+        findings.discrepancies += _price_findings(sku, product.variant.price, selection, compare)
     return findings
 
 
-def _price_finding(
-    sku: str,
-    shopify_price: Decimal,
-    applicable: list[ErpItemPrice],
-    unset_uom: list[ErpItemPrice],
-    compare: bool,
-) -> Discrepancy | None:
-    if unset_uom:
-        return Discrepancy(
-            type=DiscrepancyType.PRICE_UOM_MISSING,
-            key=sku,
-            shopify_value=shopify_price,
-            source_of_truth=System.ERPNEXT,
-            suggested_action=(
-                "Set the UOM on the Item Price row(s); until then the price is not compared."
-            ),
-            detail=f"{len(unset_uom)} otherwise applicable price row(s) without UOM",
+def _price_findings(
+    sku: str, shopify_price: Decimal, selection: PriceSelection, compare: bool
+) -> list[Discrepancy]:
+    findings: list[Discrepancy] = []
+    if selection.without_uom:
+        findings.append(
+            Discrepancy(
+                type=DiscrepancyType.PRICE_UOM_MISSING,
+                key=sku,
+                source_of_truth=System.ERPNEXT,
+                suggested_action="Set the UOM on the Item Price row(s); ERPNext v16 requires it.",
+                detail=(
+                    f"{selection.without_uom} applicable price row(s) without UOM "
+                    "(ERPNext treats them as matching any UOM)"
+                ),
+            )
         )
-    if not applicable:
-        return Discrepancy(
-            type=DiscrepancyType.PRICE_MISSING,
-            key=sku,
-            shopify_value=shopify_price,
-            source_of_truth=System.ERPNEXT,
-            suggested_action=(
-                "Add one Item Price on the configured selling price list (stock UOM, no customer, "
-                "no batch, valid today)."
-            ),
+    if selection.tied:
+        findings.append(
+            Discrepancy(
+                type=DiscrepancyType.PRICE_AMBIGUOUS,
+                key=sku,
+                shopify_value=shopify_price,
+                source_of_truth=System.ERPNEXT,
+                suggested_action=(
+                    "Remove or end-date (valid_upto) all but one of the tied Item Price rows."
+                ),
+                detail=(
+                    f"{len(selection.tied)} price rows tie on valid_from and UOM; ERPNext's "
+                    "choice between them is undefined, so prices were not compared"
+                ),
+            )
         )
-    if len(applicable) > 1:
-        return Discrepancy(
-            type=DiscrepancyType.PRICE_AMBIGUOUS,
-            key=sku,
-            shopify_value=shopify_price,
-            source_of_truth=System.ERPNEXT,
-            suggested_action="Keep exactly one applicable Item Price on the selling price list.",
-            detail=f"{len(applicable)} applicable price rows",
+    elif selection.selected is None:
+        findings.append(
+            Discrepancy(
+                type=DiscrepancyType.PRICE_MISSING,
+                key=sku,
+                shopify_value=shopify_price,
+                source_of_truth=System.ERPNEXT,
+                suggested_action=(
+                    "Add an Item Price on the configured selling price list (stock UOM, no "
+                    "customer, no batch, valid today)."
+                ),
+            )
         )
-    erp_price = applicable[0].price_list_rate
-    if compare and abs(shopify_price - erp_price) > PRICE_TOLERANCE:
-        return Discrepancy(
-            type=DiscrepancyType.PRICE_MISMATCH,
-            key=sku,
-            shopify_value=shopify_price,
-            erp_value=erp_price,
-            source_of_truth=System.ERPNEXT,
-            suggested_action="Update the Shopify price to the ERPNext price.",
+    elif compare and abs(shopify_price - selection.selected.price_list_rate) > PRICE_TOLERANCE:
+        findings.append(
+            Discrepancy(
+                type=DiscrepancyType.PRICE_MISMATCH,
+                key=sku,
+                shopify_value=shopify_price,
+                erp_value=selection.selected.price_list_rate,
+                source_of_truth=System.ERPNEXT,
+                suggested_action="Update the Shopify price to the ERPNext price.",
+                detail="ERPNext price inherited from the template item"
+                if selection.from_template
+                else "",
+            )
         )
-    return None
+    return findings
 
 
 # --- Stock ---------------------------------------------------------------------------------

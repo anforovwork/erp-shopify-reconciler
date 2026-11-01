@@ -25,16 +25,22 @@ The full v1 rules are in [CLAUDE.md](../CLAUDE.md#reconciliation-rules-v1-decide
 | `has_variants` | 0 (excludes variant templates) |
 | `item_group` | one of `ERPNEXT_ITEM_GROUPS` |
 
-## Applicable ERPNext Item Price row
+## ERPNext price selection
 
-| Item Price field | Rule |
-|---|---|
-| `price_list` | equals `ERPNEXT_PRICE_LIST` |
-| `customer` | empty (no customer-specific prices) |
-| `batch_no` | empty (no batch-specific prices) |
-| `uom` | equals the item's `stock_uom`. Empty UOM → `PRICE_UOM_MISSING` (ERPNext v16 requires it; its own lookup treats empty as "any UOM") |
-| `packing_unit` | 0 or 1 (larger values only apply to multiples of the pack size) |
-| `valid_from` / `valid_upto` | run date (calendar day in `ERPNEXT_TIMEZONE`) inside the range, inclusive; empty = open-ended |
+Reproduces ERPNext v16.53.0's selling-price lookup for one unit in the stock UOM, without customer
+or batch, on the run date (calendar day in `ERPNEXT_TIMEZONE`). Details in
+[CLAUDE.md](../CLAUDE.md#reconciliation-rules-v1-decided-2026-11-01).
+
+| Item Price field | Candidate rule | Precedence |
+|---|---|---|
+| `price_list` | equals `ERPNEXT_PRICE_LIST` | — |
+| `customer`, `supplier`, `batch_no` | all empty | — |
+| `uom` | the item's `stock_uom`, or empty (empty also → `PRICE_UOM_MISSING`) | 2nd: stock UOM > `''` > NULL |
+| `packing_unit` | fits one unit: 0 or 1 | — |
+| `valid_from` | empty or ≤ run date | 1st: newest wins; empty ranks last |
+| `valid_upto` | empty or ≥ run date | not a tie-breaker |
+| `creation`, `name`, `price_list_rate` | — | not tie-breakers → a tie is `PRICE_AMBIGUOUS` |
+| (variant) | no own candidate → the template item's rows (`Item.variant_of`) | same rules |
 
 ## Shopify variants in scope
 

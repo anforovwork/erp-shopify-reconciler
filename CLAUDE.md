@@ -103,15 +103,24 @@ and in one of the configured Item Groups (`ERPNEXT_ITEM_GROUPS`). Items outside 
 `MISSING_IN_SHOPIFY`. A Shopify SKU whose ERPNext item exists but is out of scope is **skipped** (check
 `scope`) with the exclusion reasons, not reported as `MISSING_IN_ERP`.
 
-**Prices.** One configured Selling Price List. An Item Price row is *applicable* when it is on that list,
-has no customer and no batch, has `packing_unit` 0 or 1 (ERPNext uses larger pack sizes only for
-multiples), has a UOM equal to the item's stock UOM, and is valid on the run date (`valid_from` /
-`valid_upto`, both inclusive, empty = open). The run date is the calendar day in `ERPNEXT_TIMEZONE`
-(the ERPNext site timezone; `America/Edmonton` in development). All stored timestamps are UTC. A row that fits every rule but has **no UOM** →
-`PRICE_UOM_MISSING` and no other price check for that SKU (ERPNext v16 requires the UOM, but its own
-lookup treats an empty UOM as matching any UOM, so applicability is unclear). Otherwise zero applicable
-rows → `PRICE_MISSING`; more than one → `PRICE_AMBIGUOUS`. Mismatch when `|shopify − erp| > 0.01`
-(exactly 0.01 is fine).
+**Prices.** The ERPNext price is the one ERPNext itself would select — a reproduction of ERPNext
+v16.53.0's selling-price lookup (`get_price_list_rate` → `get_price_list_rate_for` → `get_item_price`),
+verified against the installed source and the SQL it builds — for **one unit in the item's stock UOM,
+no customer, no batch**, on the run date (the calendar day in `ERPNEXT_TIMEZONE`, the ERPNext site
+timezone; `America/Edmonton` in development). All stored timestamps are UTC.
+1. *Candidates:* rows on `ERPNEXT_PRICE_LIST` with UOM equal to the stock UOM **or empty**, no batch,
+   no customer, no supplier, valid on the run date (`valid_from`/`valid_upto` inclusive, empty =
+   open), and a `packing_unit` that fits one unit (0 or 1).
+2. *Precedence* (ERPNext's `ORDER BY`): newest `valid_from` first (a missing `valid_from` ranks last),
+   then `uom` descending (stock UOM > `''` > NULL). `valid_upto`, rate, creation time and name are
+   **not** tie-breakers.
+3. *Variant fallback:* if a variant has no candidate row, its template's rows are used (ERPNext v16
+   blocks new template prices, but existing ones still apply).
+4. *Result:* one top row → that price is compared (mismatch when `|shopify − erp| > 0.01`; exactly
+   0.01 is fine). Several rows tied on the top precedence → ERPNext's choice depends on database row
+   order, which is undefined → `PRICE_AMBIGUOUS`, no numeric comparison. No candidate → `PRICE_MISSING`.
+   Any candidate without UOM additionally → `PRICE_UOM_MISSING` (data quality; ERPNext v16 requires
+   the UOM but still uses such rows, so the comparison is not blocked).
 `Decimal` everywhere, including JSON parsing. No currency conversion: if the Shopify store currency,
 the price list currency and `CURRENCY` are not all equal, that is a configuration error.
 Tax: prices are compared only when `ERPNEXT_PRICES_INCLUDE_TAX` is set and equals Shopify's
@@ -149,8 +158,8 @@ Data quality (reported in their own section, but they are discrepancies and coun
 - `SKU_EMPTY` — Shopify variant without a SKU (or an ERPNext item code that is blank after trimming)
 - `SKU_DUPLICATE` — the same SKU appears more than once in one system
 - `PRICE_MISSING` — matched item has no applicable ERPNext price
-- `PRICE_AMBIGUOUS` — matched item has more than one applicable ERPNext price
-- `PRICE_UOM_MISSING` — an otherwise applicable ERPNext price row has no UOM
+- `PRICE_AMBIGUOUS` — ERPNext's own price choice is undefined (rows tie on its precedence)
+- `PRICE_UOM_MISSING` — a candidate ERPNext price row has no UOM
 
 Each discrepancy records: type, SKU/order id, value in each system, which system is the source of truth,
 and a suggested action (text only — the tool never fixes anything itself). Checks that could not run are
