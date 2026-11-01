@@ -26,6 +26,7 @@ def _shopify(currency: str = "CAD") -> ShopifyData:
             variant("DUP-1", 6),
             variant("DUP-1", 7),
             variant("UNTRACKED-1", 8, inventory_tracked=False),
+            variant("DISABLED-1", 9),
         ),
         orders=(order(1), order(2), order(3, test=True)),
     )
@@ -36,7 +37,11 @@ def _erp(sales_orders: tuple | None = (sales_order(1),)) -> ErpData:
     return ErpData(
         fetched_at=ERP_FETCHED,
         price_list_currency="CAD",
-        items=(*(item(code) for code in codes), item("RAW-1", item_group="Raw Material")),
+        items=(
+            *(item(code) for code in codes),
+            item("RAW-1", item_group="Raw Material"),
+            item("DISABLED-1", disabled=True),
+        ),
         prices=tuple(price(code) for code in codes if code != "STOCK-1"),
         bins=tuple(stock_bin(code, "5") for code in codes),
         sales_orders=sales_orders,
@@ -56,7 +61,10 @@ def test_full_reconciliation() -> None:
         (DiscrepancyType.STOCK_MISMATCH, "STOCK-1"),
         (DiscrepancyType.ORDER_NOT_IN_ERP, "gid://shopify/Order/2"),
     ]
-    assert [(s.check, s.key) for s in result.skipped] == [(CheckName.STOCK, "UNTRACKED-1")]
+    assert [(s.check, s.key) for s in result.skipped] == [
+        (CheckName.SCOPE, "DISABLED-1"),
+        (CheckName.STOCK, "UNTRACKED-1"),
+    ]
     assert result.warnings == ()
     assert result.generated_at == AS_OF
     assert result.shopify_fetched_at == SHOPIFY_FETCHED

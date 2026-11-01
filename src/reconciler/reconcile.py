@@ -85,14 +85,31 @@ def normalize_sku(raw: str | None) -> str:
     return (raw or "").strip()
 
 
+def scope_exclusions(item: ErpItem, options: ReconcileOptions) -> list[str]:
+    """Why an ERPNext item is outside the reconciled scope; empty list = in scope."""
+    rules = [
+        (item.disabled, "disabled"),
+        (not item.is_sales_item, "not a sales item"),
+        (not item.is_stock_item, "not a stock item"),
+        (item.has_variants, "variant template"),
+        (item.item_group not in options.item_groups, "item group not in ERPNEXT_ITEM_GROUPS"),
+    ]
+    return [reason for excluded, reason in rules if excluded]
+
+
 def is_in_scope(item: ErpItem, options: ReconcileOptions) -> bool:
-    return (
-        not item.disabled
-        and item.is_sales_item
-        and item.is_stock_item
-        and not item.has_variants
-        and item.item_group in options.item_groups
-    )
+    return not scope_exclusions(item, options)
+
+
+def out_of_scope_reasons(items: Iterable[ErpItem], options: ReconcileOptions) -> dict[str, str]:
+    """Normalized item code -> why it is excluded, for items outside the scope."""
+    reasons: dict[str, set[str]] = {}
+    for item in items:
+        sku = normalize_sku(item.item_code)
+        excluded = scope_exclusions(item, options)
+        if sku and excluded:
+            reasons.setdefault(sku, set()).update(excluded)
+    return {sku: ", ".join(sorted(found)) for sku, found in reasons.items()}
 
 
 def index_by_sku[T](records: Iterable[T], sku_of: Callable[[T], str | None]) -> SkuIndex[T]:
@@ -174,11 +191,18 @@ def match_products(
     }
 
 
-def check_missing(shopify: SkuIndex[ShopifyVariant], erp: SkuIndex[ErpItem]) -> list[Discrepancy]:
+def check_missing(
+    shopify: SkuIndex[ShopifyVariant],
+    erp: SkuIndex[ErpItem],
+    out_of_scope: dict[str, str],
+) -> Findings:
+    """Missing products. A Shopify SKU whose ERPNext item exists but is out of scope is
+    skipped with the reason; MISSING_IN_ERP is only for codes ERPNext does not have at all."""
     ambiguous = ambiguous_skus(shopify, erp)
     missing_in_shopify = sorted(erp.unique.keys() - shopify.unique.keys() - ambiguous)
-    missing_in_erp = sorted(shopify.unique.keys() - erp.unique.keys() - ambiguous)
-    findings = [
+    not_in_scope = sorted(shopify.unique.keys() - erp.unique.keys() - ambiguous)
+    findings = Findings()
+    findings.discrepancies += [
         Discrepancy(
             type=DiscrepancyType.MISSING_IN_SHOPIFY,
             key=sku,
@@ -190,18 +214,27 @@ def check_missing(shopify: SkuIndex[ShopifyVariant], erp: SkuIndex[ErpItem]) -> 
         )
         for sku in missing_in_shopify
     ]
-    findings += [
-        Discrepancy(
-            type=DiscrepancyType.MISSING_IN_ERP,
-            key=sku,
-            source_of_truth=System.ERPNEXT,
-            suggested_action=(
-                "Not found among enabled sales items in the configured ERPNext item groups: "
-                "create or fix the ERPNext item, or correct the Shopify SKU."
-            ),
-        )
-        for sku in missing_in_erp
-    ]
+    for sku in not_in_scope:
+        if sku in out_of_scope:
+            findings.skipped.append(
+                SkippedCheck(
+                    check=CheckName.SCOPE,
+                    key=sku,
+                    reason=f"ERPNext item exists but is out of scope: {out_of_scope[sku]}.",
+                )
+            )
+        else:
+            findings.discrepancies.append(
+                Discrepancy(
+                    type=DiscrepancyType.MISSING_IN_ERP,
+                    key=sku,
+                    source_of_truth=System.ERPNEXT,
+                    suggested_action=(
+                        "No ERPNext item has this code: create the item, or correct the "
+                        "Shopify SKU."
+                    ),
+                )
+            )
     return findings
 
 
@@ -436,7 +469,9 @@ def reconcile(
     matched = match_products(shopify_index, erp_index)
 
     findings = Findings(discrepancies=check_sku_quality(shopify_index, erp_index))
-    findings.discrepancies += check_missing(shopify_index, erp_index)
+    findings.extend(
+        check_missing(shopify_index, erp_index, out_of_scope_reasons(erp.items, options))
+    )
     findings.extend(check_prices(matched, erp.prices, shopify.shop, options))
     findings.extend(check_stock(matched, erp.bins, options))
     findings.extend(check_orders(shopify.orders, erp.sales_orders, options))

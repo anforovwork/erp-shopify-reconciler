@@ -11,10 +11,12 @@ from reconciler.models import (
     ErpItemPrice,
     ShopifyOrder,
     ShopifyShop,
+    ShopifyVariant,
     System,
 )
 from reconciler.reconcile import (
     ConfigurationError,
+    Findings,
     check_missing,
     check_orders,
     check_prices,
@@ -25,12 +27,24 @@ from reconciler.reconcile import (
     is_in_scope,
     match_products,
     normalize_sku,
+    out_of_scope_reasons,
+    scope_exclusions,
     validate_currencies,
 )
 
 
 def _types(discrepancies: list) -> list[tuple[DiscrepancyType, str]]:
     return [(d.type, d.key) for d in discrepancies]
+
+
+def _missing(variants: list[ShopifyVariant], items: list[ErpItem]) -> Findings:
+    """Run check_missing exactly the way reconcile() wires it up."""
+    opts = options()
+    return check_missing(
+        index_shopify_variants(variants),
+        index_erp_items(items, opts),
+        out_of_scope_reasons(items, opts),
+    )
 
 
 # --- SKU matching and scope ----------------------------------------------------------------
@@ -67,7 +81,10 @@ def test_matching_is_exact_after_trim_and_case_sensitive() -> None:
     erp = index_erp_items([item("SKU-1"), item("SKU-2")], options())
 
     assert list(match_products(shopify, erp)) == ["SKU-1"]
-    assert _types(check_missing(shopify, erp)) == [
+    findings = _missing(
+        [variant(" SKU-1 ", 1), variant("sku-2", 2)], [item("SKU-1"), item("SKU-2")]
+    )
+    assert _types(findings.discrepancies) == [
         (DiscrepancyType.MISSING_IN_SHOPIFY, "SKU-2"),
         (DiscrepancyType.MISSING_IN_ERP, "sku-2"),
     ]
@@ -112,24 +129,28 @@ def test_duplicated_sku_gets_no_match_and_no_missing_finding() -> None:
     erp = index_erp_items([item("SKU-1")], options())
 
     assert match_products(shopify, erp) == {}
-    assert check_missing(shopify, erp) == []
+    findings = _missing([variant("SKU-1", 1), variant("SKU-1", 2)], [item("SKU-1")])
+    assert findings.discrepancies == []
+    assert findings.skipped == []
 
 
-# --- MISSING_IN_SHOPIFY / MISSING_IN_ERP ---------------------------------------------------
+# --- MISSING_IN_SHOPIFY / MISSING_IN_ERP / out of scope ------------------------------------
 
 
 def test_products_on_both_sides_are_not_missing() -> None:
-    shopify = index_shopify_variants([variant("SKU-1")])
-    erp = index_erp_items([item("SKU-1")], options())
+    findings = _missing([variant("SKU-1")], [item("SKU-1")])
 
-    assert check_missing(shopify, erp) == []
+    assert findings.discrepancies == []
+    assert findings.skipped == []
 
 
 def test_missing_on_each_side_is_reported_sorted() -> None:
-    shopify = index_shopify_variants([variant("SKU-3", 1), variant("SKU-1", 2)])
-    erp = index_erp_items([item("SKU-2"), item("SKU-1"), item("SKU-0")], options())
+    findings = _missing(
+        [variant("SKU-3", 1), variant("SKU-1", 2)],
+        [item("SKU-2"), item("SKU-1"), item("SKU-0")],
+    )
 
-    assert _types(check_missing(shopify, erp)) == [
+    assert _types(findings.discrepancies) == [
         (DiscrepancyType.MISSING_IN_SHOPIFY, "SKU-0"),
         (DiscrepancyType.MISSING_IN_SHOPIFY, "SKU-2"),
         (DiscrepancyType.MISSING_IN_ERP, "SKU-3"),
@@ -137,17 +158,46 @@ def test_missing_on_each_side_is_reported_sorted() -> None:
 
 
 def test_out_of_scope_erp_item_is_never_missing_in_shopify() -> None:
-    shopify = index_shopify_variants([])
-    erp = index_erp_items([item("RAW-1", item_group="Raw Material")], options())
+    findings = _missing([], [item("RAW-1", item_group="Raw Material")])
 
-    assert check_missing(shopify, erp) == []
+    assert findings.discrepancies == []
+    assert findings.skipped == []
 
 
-def test_shopify_sku_whose_erp_item_is_out_of_scope_is_missing_in_erp() -> None:
-    shopify = index_shopify_variants([variant("SKU-1")])
-    erp = index_erp_items([item("SKU-1", disabled=True)], options())
+def test_shopify_sku_whose_erp_item_is_out_of_scope_is_skipped_with_reason() -> None:
+    findings = _missing([variant("SKU-1")], [item("SKU-1", disabled=True, is_sales_item=False)])
 
-    assert _types(check_missing(shopify, erp)) == [(DiscrepancyType.MISSING_IN_ERP, "SKU-1")]
+    assert findings.discrepancies == []
+    [skipped] = findings.skipped
+    assert (skipped.check, skipped.key) == (CheckName.SCOPE, "SKU-1")
+    assert skipped.reason == (
+        "ERPNext item exists but is out of scope: disabled, not a sales item."
+    )
+
+
+def test_out_of_scope_lookup_uses_trimmed_codes() -> None:
+    findings = _missing([variant("SKU-1")], [item(" SKU-1 ", item_group="Raw Material")])
+
+    assert [(s.key, s.reason) for s in findings.skipped] == [
+        (
+            "SKU-1",
+            "ERPNext item exists but is out of scope: item group not in ERPNEXT_ITEM_GROUPS.",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("excluded", "reason"),
+    [
+        (item("X", disabled=True), "disabled"),
+        (item("X", is_sales_item=False), "not a sales item"),
+        (item("X", is_stock_item=False), "not a stock item"),
+        (item("X", has_variants=True), "variant template"),
+        (item("X", item_group="Raw Material"), "item group not in ERPNEXT_ITEM_GROUPS"),
+    ],
+)
+def test_each_scope_exclusion_has_a_reason(excluded: ErpItem, reason: str) -> None:
+    assert scope_exclusions(excluded, options()) == [reason]
 
 
 # --- Prices --------------------------------------------------------------------------------
