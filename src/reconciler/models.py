@@ -106,6 +106,8 @@ class ErpItem(_Record):
     is_sales_item: bool
     is_stock_item: bool
     has_variants: bool
+    variant_of: str | None
+    """Template item code; ERPNext falls back to the template's price for a variant."""
 
 
 class ErpItemPrice(_Record):
@@ -113,7 +115,9 @@ class ErpItemPrice(_Record):
     price_list: str
     price_list_rate: Amount
     uom: str | None
+    """Kept as returned: '' and None sort differently in ERPNext's price precedence."""
     customer: str | None
+    supplier: str | None
     batch_no: str | None
     valid_from: date | None
     valid_upto: date | None

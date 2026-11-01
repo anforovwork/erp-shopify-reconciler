@@ -54,19 +54,23 @@ def item(code: str, **overrides: object) -> ErpItem:
         "is_sales_item": True,
         "is_stock_item": True,
         "has_variants": False,
+        "variant_of": None,
     }
     return ErpItem.model_validate(fields | overrides)
 
 
-def price(code: str, rate: str = "10.00", **overrides: object) -> ErpItemPrice:
+def price(
+    code: str, rate: str = "10.00", valid_from: date | None = None, **overrides: object
+) -> ErpItemPrice:
     fields: dict[str, object] = {
         "item_code": code,
         "price_list": PRICE_LIST,
         "price_list_rate": Decimal(rate),
         "uom": "Nos",
         "customer": None,
+        "supplier": None,
         "batch_no": None,
-        "valid_from": None,
+        "valid_from": valid_from,
         "valid_upto": None,
         "packing_unit": 0,
     }
