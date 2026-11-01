@@ -1,0 +1,7 @@
+{"data": [
+  {"item_code": "TEST-RAW-1", "item_group": "Raw Material", "stock_uom": "Kg", "disabled": 0, "is_sales_item": 0, "is_stock_item": 1, "has_variants": 0, "variant_of": null},
+  {"item_code": "TEST-SKU-1", "item_group": "Test Products", "stock_uom": "Nos", "disabled": 0, "is_sales_item": 1, "is_stock_item": 1, "has_variants": 0, "variant_of": null},
+  {"item_code": "TEST-SKU-2", "item_group": "Test Products", "stock_uom": "Nos", "disabled": 0, "is_sales_item": 1, "is_stock_item": 1, "has_variants": 0, "variant_of": "TEST-TPL-1"},
+  {"item_code": "TEST-SKU-3", "item_group": "Test Products", "stock_uom": "Nos", "disabled": 1, "is_sales_item": 1, "is_stock_item": 1, "has_variants": 0, "variant_of": null},
+  {"item_code": "TEST-TPL-1", "item_group": "Test Products", "stock_uom": "Nos", "disabled": 0, "is_sales_item": 1, "is_stock_item": 1, "has_variants": 1, "variant_of": null}
+]}
