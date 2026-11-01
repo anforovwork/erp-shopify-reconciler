@@ -410,14 +410,9 @@ def check_stock(
     erp_qty = {b.item_code: b.actual_qty for b in bins if b.warehouse == options.warehouse}
     findings = Findings()
     for sku, product in matched.items():
-        qty = erp_qty.get(product.item.item_code)
-        if qty is None and not bins_trustworthy:
-            findings.skipped.append(
-                SkippedCheck(check=CheckName.STOCK, key=sku, reason=NO_BIN_UNCONFIRMED)
-            )
-            continue
-        qty = Decimal(0) if qty is None else qty
-        reason = _stock_skip_reason(product, qty, options)
+        bin_qty = erp_qty.get(product.item.item_code)
+        reason = _stock_skip_reason(product, bin_qty, options, bins_trustworthy)
+        qty = Decimal(0) if bin_qty is None else bin_qty
         if reason:
             findings.skipped.append(SkippedCheck(check=CheckName.STOCK, key=sku, reason=reason))
         elif Decimal(product.variant.on_hand or 0) != qty:
@@ -438,15 +433,21 @@ def check_stock(
 
 
 def _stock_skip_reason(
-    product: MatchedProduct, erp_qty: Decimal, options: ReconcileOptions
+    product: MatchedProduct,
+    bin_qty: Decimal | None,
+    options: ReconcileOptions,
+    bins_trustworthy: bool,
 ) -> str | None:
+    """First reason the stock check cannot run, most specific first; None = compare."""
     if not product.variant.inventory_tracked:
         return "Inventory is not tracked in Shopify for this variant."
     if product.variant.on_hand is None:
         return "Variant is not stocked at the configured Shopify location."
     if product.item.stock_uom not in options.unit_uoms:
         return "ERPNext stock UOM is not in ERPNEXT_UNIT_UOMS, so units are not comparable."
-    if erp_qty != erp_qty.to_integral_value():
+    if bin_qty is None and not bins_trustworthy:
+        return NO_BIN_UNCONFIRMED
+    if bin_qty is not None and bin_qty != bin_qty.to_integral_value():
         return "ERPNext quantity is fractional; Shopify counts whole units."
     return None
 

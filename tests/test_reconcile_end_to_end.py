@@ -121,7 +121,8 @@ def test_unconfirmed_bin_data_never_turns_into_zero_stock(
     assert DiscrepancyType.STOCK_MISMATCH not in {d.type for d in result.discrepancies}
     stock_skips = [(s.key, s.reason) for s in result.skipped if s.check is CheckName.STOCK]
     assert stock_skips == [
-        (sku, NO_BIN_UNCONFIRMED) for sku in ("OK-1", "PRICE-1", "STOCK-1", "UNTRACKED-1")
+        *((sku, NO_BIN_UNCONFIRMED) for sku in ("OK-1", "PRICE-1", "STOCK-1")),
+        ("UNTRACKED-1", "Inventory is not tracked in Shopify for this variant."),
     ]
 
 
