@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -63,6 +63,21 @@ def test_naive_datetime_is_rejected() -> None:
             cancelled=False,
             test=False,
         )
+
+
+def test_timestamps_are_stored_in_utc() -> None:
+    edmonton_evening = datetime(2026, 11, 1, 20, 0, tzinfo=timezone(timedelta(hours=-7)))
+
+    created = ShopifyOrder(
+        order_id="gid://shopify/Order/1",
+        created_at=edmonton_evening,
+        financial_status="PAID",
+        cancelled=False,
+        test=False,
+    ).created_at
+
+    assert created.tzinfo is UTC
+    assert created == datetime(2026, 11, 2, 3, 0, tzinfo=UTC)
 
 
 def test_erpnext_integer_flags_become_booleans() -> None:

@@ -22,6 +22,7 @@ WAREHOUSE = "Test Stores - TC"
 def options(**overrides: object) -> ReconcileOptions:
     fields: dict[str, object] = {
         "as_of": AS_OF,
+        "price_timezone": "America/Edmonton",
         "item_groups": frozenset({GROUP}),
         "price_list": PRICE_LIST,
         "currency": "CAD",

@@ -101,7 +101,8 @@ and in one of the configured Item Groups (`ERPNEXT_ITEM_GROUPS`). Items outside 
 **Prices.** One configured Selling Price List. An Item Price row is *applicable* when it is on that list,
 has no customer and no batch, has `packing_unit` 0 or 1 (ERPNext uses larger pack sizes only for
 multiples), has a UOM equal to the item's stock UOM, and is valid on the run date (`valid_from` /
-`valid_upto`, both inclusive, empty = open). A row that fits every rule but has **no UOM** →
+`valid_upto`, both inclusive, empty = open). The run date is the calendar day in `ERPNEXT_TIMEZONE`
+(the ERPNext site timezone; `America/Edmonton` in development). All stored timestamps are UTC. A row that fits every rule but has **no UOM** →
 `PRICE_UOM_MISSING` and no other price check for that SKU (ERPNext v16 requires the UOM, but its own
 lookup treats an empty UOM as matching any UOM, so applicability is unclear). Otherwise zero applicable
 rows → `PRICE_MISSING`; more than one → `PRICE_AMBIGUOUS`. Mismatch when `|shopify − erp| > 0.01` (exactly 0.01 is fine).
@@ -121,7 +122,8 @@ whose inventory is not tracked, variants not stocked at the location, items whos
 `ERPNEXT_UNIT_UOMS`, fractional `actual_qty`. Sellable/reserved quantities are out of scope for v1.
 
 **Orders.** Shopify order GID (`gid://shopify/Order/…`) is the identifier. Eligible orders: created within
-`ORDER_LOOKBACK_DAYS` (default 30), financial status `PAID`, not cancelled, not test; draft orders are
+`ORDER_LOOKBACK_DAYS` (default 30, maximum 60 — `read_orders` only exposes 60 days and v1 never
+requests `read_all_orders`), financial status `PAID`, not cancelled, not test; draft orders are
 never fetched. ERPNext stores the GID in a dedicated custom field on Sales Order (`ERPNEXT_ORDER_ID_FIELD`);
 only submitted Sales Orders (`docstatus = 1`) count as a match. If the field is not configured or does not
 exist, order reconciliation is skipped with a warning — the tool never creates the field.

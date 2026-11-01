@@ -12,7 +12,12 @@ from typing import Annotated
 from pydantic import Field, HttpUrl, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from reconciler.reconcile import ConfigurationError, ReconcileOptions
+from reconciler.models import TimezoneName
+from reconciler.reconcile import (
+    MAX_ORDER_LOOKBACK_DAYS,
+    ConfigurationError,
+    ReconcileOptions,
+)
 
 CommaSeparated = Annotated[frozenset[str], NoDecode]
 
@@ -36,10 +41,12 @@ class Settings(BaseSettings):
     erpnext_unit_uoms: CommaSeparated = Field(min_length=1)
     erpnext_prices_include_tax: bool | None = None
     erpnext_order_id_field: str | None = Field(default=None, pattern=r"^[a-z_][a-z0-9_]*$")
+    erpnext_timezone: TimezoneName
+    """Must match the ERPNext site timezone (System Settings)."""
 
     # Reconciliation
     currency: str = Field(pattern=r"^[A-Z]{3}$")
-    order_lookback_days: int = Field(default=30, gt=0)
+    order_lookback_days: int = Field(default=30, gt=0, le=MAX_ORDER_LOOKBACK_DAYS)
 
     @field_validator("erpnext_item_groups", "erpnext_unit_uoms", mode="before")
     @classmethod
@@ -56,6 +63,7 @@ class Settings(BaseSettings):
     def to_options(self, as_of: datetime) -> ReconcileOptions:
         return ReconcileOptions(
             as_of=as_of,
+            price_timezone=self.erpnext_timezone,
             item_groups=self.erpnext_item_groups,
             price_list=self.erpnext_price_list,
             currency=self.currency,

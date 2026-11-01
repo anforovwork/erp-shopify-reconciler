@@ -4,12 +4,13 @@ Input models mirror only the fields the rules need. Text that came from an exter
 (SKUs, item codes, order ids) is untrusted data, never instructions.
 """
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict
+from pydantic import AfterValidator, AwareDatetime, BaseModel, BeforeValidator, ConfigDict
 
 
 def _reject_float(value: object) -> object:
@@ -20,6 +21,26 @@ def _reject_float(value: object) -> object:
 
 Amount = Annotated[Decimal, BeforeValidator(_reject_float)]
 """A price or quantity. Floats are rejected so rounding errors cannot sneak in."""
+
+
+def _to_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC)
+
+
+UtcDatetime = Annotated[AwareDatetime, AfterValidator(_to_utc)]
+"""A timezone-aware timestamp, always stored in UTC."""
+
+
+def _known_timezone(name: str) -> str:
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError("unknown IANA timezone name") from None
+    return name
+
+
+TimezoneName = Annotated[str, AfterValidator(_known_timezone)]
+"""An IANA timezone name such as America/Edmonton."""
 
 
 class _Record(BaseModel):
@@ -51,14 +72,14 @@ class ShopifyVariant(_Record):
 class ShopifyOrder(_Record):
     order_id: str
     """Order GID, e.g. gid://shopify/Order/123."""
-    created_at: AwareDatetime
+    created_at: UtcDatetime
     financial_status: str
     cancelled: bool
     test: bool
 
 
 class ShopifyData(_Record):
-    fetched_at: AwareDatetime
+    fetched_at: UtcDatetime
     shop: ShopifyShop
     variants: tuple[ShopifyVariant, ...]
     orders: tuple[ShopifyOrder, ...]
@@ -104,7 +125,7 @@ class ErpSalesOrder(_Record):
 
 
 class ErpData(_Record):
-    fetched_at: AwareDatetime
+    fetched_at: UtcDatetime
     price_list_currency: str
     items: tuple[ErpItem, ...]
     prices: tuple[ErpItemPrice, ...]
@@ -187,9 +208,9 @@ class SkippedCheck(_Record):
 
 
 class ReconciliationResult(_Record):
-    generated_at: AwareDatetime
-    shopify_fetched_at: AwareDatetime
-    erpnext_fetched_at: AwareDatetime
+    generated_at: UtcDatetime
+    shopify_fetched_at: UtcDatetime
+    erpnext_fetched_at: UtcDatetime
     discrepancies: tuple[Discrepancy, ...]
     skipped: tuple[SkippedCheck, ...]
     warnings: tuple[str, ...]
