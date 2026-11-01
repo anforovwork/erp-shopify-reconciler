@@ -14,9 +14,13 @@ Each mismatch is lost money or a disappointed customer. This tool finds them bef
 
 ## Safety by design
 
-- **Read-only** against both systems (Shopify read scopes only; ERPNext read-only role).
-- **No secrets in the repo** — environment variables only, gitleaks on every commit and in CI.
-- **MCP tools return reports, never take actions**; store data is treated as untrusted text (prompt-injection defence).
+- **Read-only** against both systems, enforced twice: by the credentials (Shopify read scopes only,
+  checked at startup; ERPNext [read-only role](docs/erpnext-readonly-user.md)) and by the HTTP layer
+  (ERPNext `GET` only; Shopify GraphQL queries only, mutations rejected).
+- **No secrets in the repo** — environment variables only. Gitleaks scans staged changes on every commit
+  (pre-commit hook) and the full history in CI after every push.
+- **MCP tools return reports, never take actions** (stdio only, minimal structured data, no customer
+  details); store data is treated as untrusted text (prompt-injection defence).
 - **No real customer data** — test data is generated.
 
 ## Source of truth
