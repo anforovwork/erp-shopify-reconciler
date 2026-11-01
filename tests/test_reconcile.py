@@ -438,6 +438,13 @@ def test_missing_bin_is_not_zero_when_bin_data_is_unconfirmed() -> None:
     assert "not assuming zero" in skipped.reason
 
 
+def test_shopify_side_skip_reason_wins_over_unconfirmed_bin_data() -> None:
+    findings = _stock_findings([], bins_trustworthy=False, inventory_tracked=False)
+
+    [skipped] = findings.skipped
+    assert skipped.reason == "Inventory is not tracked in Shopify for this variant."
+
+
 def test_existing_bin_is_still_compared_when_bin_data_is_unconfirmed() -> None:
     findings = _stock_findings([stock_bin("SKU-1", "3")], bins_trustworthy=False, on_hand=5)
 
