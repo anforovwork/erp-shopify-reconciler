@@ -1,12 +1,14 @@
 # Install once: pre-commit install
-# Runs on every commit: secret scan + lint. Never bypass with --no-verify.
+# Runs on every commit (not on push): secret scan of staged changes + lint.
+# CI runs gitleaks again on the full history after each push. Never bypass with --no-verify.
 repos:
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.21.2
     hooks:
       - id: gitleaks
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    # Keep in sync with the ruff pin in pyproject.toml.
+    rev: v0.17.3
     hooks:
-      - id: ruff
+      - id: ruff-check
       - id: ruff-format
