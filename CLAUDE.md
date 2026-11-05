@@ -15,7 +15,7 @@ The goal is one trusted answer for every number, and a clear record of which sys
 
 - I (the owner) am the architect and reviewer. You (Claude) implement.
 - Work in **small tasks**. Before writing code for anything non-trivial, show a short plan and wait for approval.
-- After each change, explain in plain language **what changed and why**, so I can explain every line in an interview.
+- After each change, explain in plain language **what changed and why**, so I can explain every line to anyone who reviews it.
 - Never mark a task done until tests pass and I have reviewed the diff.
 - If a requirement is unclear, ask. Do not guess about business rules.
 
@@ -59,9 +59,9 @@ The goal is one trusted answer for every number, and a clear record of which sys
 - `httpx` — HTTP client (with timeouts and retries)
 - `pydantic` — data models and validation
 - `pytest` — tests; `ruff` — lint and format
-- `mcp` (official Python SDK, FastMCP) — MCP server
+- `mcp` (official Python SDK 2.x, `MCPServer`) — MCP server
 - ERPNext in Docker via the official `frappe_docker` `pwd.yml` (local test instance at http://localhost:8080). We only call its REST API from outside — no custom Frappe app
-- Shopify dev store from a Partner account
+- Shopify development store; the app is created in the Shopify Dev Dashboard and authenticates with the client-credentials grant
 
 ## Project structure
 
@@ -75,7 +75,8 @@ src/reconciler/
     erpnext.py       # read-only ERPNext REST client
   reconcile.py       # comparison rules -> list[Discrepancy]  (pure functions, no network)
   report.py          # Markdown + CSV report output
-  cli.py             # `reconcile run`, `reconcile report`
+  cli.py             # `reconcile run` (`reconcile report` planned)
+  snapshot.py        # JSON snapshot of each run (data, options, result)
   mcp_server.py      # read-only MCP tools
 tests/
   fixtures/          # fake JSON API responses from both systems (client tests), e.g. erpnext/
@@ -179,8 +180,8 @@ recorded as **skipped** with a reason; reports always show skipped checks, warni
 
 ## CLI
 
-- `reconcile run` — fetch live data, reconcile, save a timestamped snapshot.
-- `reconcile report` — render Markdown or CSV from an existing snapshot; never calls external APIs.
+- `reconcile run` — fetch live data, reconcile, write the Markdown and CSV reports, save a timestamped snapshot.
+- `reconcile report` (planned) — render Markdown or CSV from an existing snapshot; never calls external APIs.
 - Exit codes: `0` no discrepancies, `1` discrepancies found, `2` operational or configuration error.
 
 ## Coding standards

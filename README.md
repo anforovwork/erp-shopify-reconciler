@@ -1,11 +1,21 @@
 # erp-shopify-reconciler
 
+[![CI](https://github.com/anforovwork/erp-shopify-reconciler/actions/workflows/ci.yml/badge.svg)](https://github.com/anforovwork/erp-shopify-reconciler/actions/workflows/ci.yml)
+
 **One trusted answer when Shopify and ERPNext disagree on price, stock or orders.**
 
 A read-only tool that compares the storefront (Shopify) with the ERP (ERPNext), reports every
 mismatch with the system that is right and a suggested fix, and exposes the results to Claude
 through a read-only MCP server. Built Claude Code-first — see [How I built it](#how-i-built-it).
-Time log: [HOURS.md](HOURS.md).
+About 17 hours from an empty machine to a verified demo: [HOURS.md](HOURS.md).
+
+## Why I built this
+
+My production work on ERP, data and internal tools belongs to my employer and can't be published.
+So I built this project from scratch — infrastructure included — to show the same kind of work in
+public: two systems of record that disagree, one source of truth for every number, read-only
+access with least-privilege credentials, secrets that never leave `.env`, and an AI assistant that
+can answer questions about the data without being able to change anything.
 
 ## Demo result
 
@@ -132,9 +142,25 @@ Built with Claude Code. Every task followed the same loop:
 **Claude implements** → **tests + ruff + gitleaks** → **smoke tests against the real systems** →
 **PR** → **merge**.
 
-My part: I set the rules (CLAUDE.md), made every business decision, approved each plan, and
-verified the results against live ERPNext and a Shopify dev store. A line-by-line code walkthrough
-is the next step.
+My part: I wrote the rules (CLAUDE.md), made every business decision, reviewed and corrected each
+plan before approving it, and verified the results with the test suite (506 tests, no network) and
+with live runs against ERPNext and the Shopify dev store.
+
+### Decisions I made
+
+- **Source of truth:** ERPNext for catalogue, prices and stock; Shopify for orders.
+- **No silent conversions:** if the store and price-list currencies differ, the tool stops with a
+  configuration error instead of converting. Prices are compared only when both systems treat tax
+  the same way.
+- **A check that cannot run is reported as skipped, never as "all good"** — for example the order
+  check while the ERPNext order-ID field is not configured.
+- **Least privilege:** exactly three read scopes on Shopify, no `read_locations`; the configured
+  location is confirmed from inventory data instead, and the tool refuses to run if it can't be.
+- **Fail closed on bad data, not on odd data:** a malformed response stops the run, but an order
+  without a financial status is recorded as `UNKNOWN` (never eligible) instead of failing everything.
+- **Scope cut on purpose:** retrying after a mid-run token rejection was deferred — the token lives
+  about 24 hours and a run takes seconds.
+- **The MCP server only reads saved snapshots** — fast, no API rate limits, and no path to change data.
 
 ### Things found along the way
 
@@ -152,6 +178,18 @@ is the next step.
   install); deactivating a location moved all stock to another location (verified 20/20 SKUs
   against the import file, then switched the configured location); the store currency was USD
   instead of CAD, which the startup currency check would have refused.
+
+## Infrastructure built from scratch
+
+| Layer | What I set up |
+|---|---|
+| Workstation | Windows 11 host, WSL2 Ubuntu 24.04, Python 3.12 virtual environment |
+| Containers | Docker Desktop with WSL integration; fixed a Windows credential-helper setting that broke `docker pull` inside Ubuntu and diagnosed a WSL-integration crash |
+| ERP | ERPNext v16 on the official `frappe_docker` stack (MariaDB, Redis, backend, workers, scheduler, websocket, frontend); company set up for Canada/CAD with warehouse and selling price list; a dedicated **Reconciler Read Only** role and API user ([guide](docs/erpnext-readonly-user.md)) |
+| Storefront | Shopify development store set to CAD with tax-exclusive prices; one stock location; Dev Dashboard app with three read scopes and client-credentials auth |
+| Test data | 300 synthetic products (`DEMO-BOS-*`) with prices and stock, loaded into both systems through their standard imports and checked against the import files |
+| Source control and CI | GitHub with SSH key auth; pre-commit (gitleaks, ruff); GitHub Actions (secret scan of full history, lint, tests) with actions pinned to commit SHAs |
+| AI tooling | Claude Code in Ubuntu with project rules in `CLAUDE.md`; read-only MCP server usable from Claude Code and Claude Desktop |
 
 ## What I would do in production
 

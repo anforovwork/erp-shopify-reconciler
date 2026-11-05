@@ -1,6 +1,7 @@
 """JSON snapshot of one run: the fetched data, the options used and the result.
 
-A snapshot lets `reconcile report` render a run again without calling any API. It holds only
+The MCP server answers from snapshots, and a planned `reconcile report` will render a run again
+without calling any API. It holds only
 the pydantic models below, never Settings, so no credential can end up in it. Decimals are
 written as JSON strings and read back as Decimal (floats are rejected by the models).
 """
