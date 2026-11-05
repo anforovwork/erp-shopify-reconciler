@@ -6,23 +6,28 @@ Safety is enforced in an httpx *transport*, so no client code path can bypass it
   `/api/method/...` calls), never with `run_method` or `cmd` parameters — Frappe executes a
   document method for `GET /api/resource/<doctype>/<name>?run_method=...`.
 * Shopify: only `POST` of a strict JSON body to the configured `/admin/api/<version>/graphql.json`,
-  whose GraphQL document (parsed by graphql-core) is exactly one query plus fragments.
+  whose GraphQL document (parsed by graphql-core) is exactly one query plus fragments — plus
+  exactly one other request: the client-credentials token exchange on `/admin/oauth/access_token`.
 
 Requests go only to the configured host, redirects are never followed, and error messages
 contain the method, path and status code — never headers, tokens or response bodies.
 """
 
 import json
+import re
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
+from urllib.parse import parse_qsl
 
 import httpx
 from graphql import GraphQLError, OperationType, parse
 from graphql.language import FragmentDefinitionNode, OperationDefinitionNode
 from pydantic import SecretStr
+
+from reconciler.reconcile import ConfigurationError
 
 # --- Errors --------------------------------------------------------------------------------
 
@@ -91,11 +96,21 @@ def _param_key(key: str) -> str:
     return key.strip().lower().removesuffix("[]")
 
 
-def shopify_policy(host: str, api_version: str) -> Policy:
+SHOPIFY_TOKEN_PATH = "/admin/oauth/access_token"  # noqa: S105 - a URL path, not a secret
+_TOKEN_FORM_KEYS = ("client_id", "client_secret", "grant_type")
+
+
+def shopify_policy(host: str, api_version: str, client_id: str) -> Policy:
+    """GraphQL queries, plus the one token exchange for this app (see _check_token_request)."""
     graphql_path = f"/admin/api/{api_version}/graphql.json"
 
     def check(request: httpx.Request) -> None:
         _check_host(request, host)
+        if request.url.scheme != "https":
+            raise ReadOnlyViolation("Shopify: only https:// is allowed")
+        if request.url.path == SHOPIFY_TOKEN_PATH:
+            _check_token_request(request, client_id)
+            return
         if request.method != "POST" or request.url.path != graphql_path:
             raise ReadOnlyViolation("Shopify: only POST to the GraphQL Admin endpoint is allowed")
         if request.url.query:
@@ -117,6 +132,35 @@ def shopify_policy(host: str, api_version: str) -> Policy:
         ensure_query_only(body["query"], operation_name)
 
     return check
+
+
+def _check_token_request(request: httpx.Request, client_id: str) -> None:
+    """Allow only `grant_type=client_credentials` for the configured app: it issues a token and
+    changes no shop data. Other grants, extra fields (e.g. `scope`) and other OAuth paths are
+    rejected. The raw path is compared, so an encoded variant of the path is rejected too."""
+    if request.method != "POST" or request.url.raw_path != SHOPIFY_TOKEN_PATH.encode():
+        raise ReadOnlyViolation("Shopify: token request must be a POST to the exact token path")
+    if any(name in request.headers for name in _METHOD_OVERRIDE_HEADERS):
+        raise ReadOnlyViolation("Shopify: method-override headers are not allowed")
+    content_type = request.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if content_type != "application/x-www-form-urlencoded":
+        raise ReadOnlyViolation("Shopify: token request must be form-encoded")
+    try:
+        pairs = parse_qsl(
+            request.content.decode("ascii"),
+            keep_blank_values=True,
+            strict_parsing=True,
+            max_num_fields=len(_TOKEN_FORM_KEYS),
+        )
+    except ValueError:  # includes UnicodeDecodeError and too many fields
+        raise ReadOnlyViolation("Shopify: token request body is malformed") from None
+    if sorted(key for key, _ in pairs) != sorted(_TOKEN_FORM_KEYS):
+        raise ReadOnlyViolation("Shopify: token request must have exactly the expected fields")
+    form = dict(pairs)
+    if form["grant_type"] != "client_credentials":
+        raise ReadOnlyViolation("Shopify: only the client_credentials grant is allowed")
+    if form["client_id"] != client_id or not form["client_secret"]:
+        raise ReadOnlyViolation("Shopify: token request is not for the configured app")
 
 
 # Persisted-query hashes ("extensions") or anything else could make the server run a document
@@ -258,11 +302,13 @@ class ReadOnlyClient:
         retry: RetryPolicy | None = None,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
         transport: httpx.BaseTransport | None = None,
+        auth: httpx.Auth | None = None,
     ) -> None:
         self.retry = retry or RetryPolicy()
         self._client = httpx.Client(
             base_url=base_url,
             headers=dict(headers),
+            auth=auth,
             timeout=timeout,
             follow_redirects=False,
             transport=ReadOnlyTransport(transport or httpx.HTTPTransport(), policy),
@@ -284,12 +330,15 @@ class ReadOnlyClient:
         *,
         params: Mapping[str, str] | None = None,
         json_body: Mapping[str, Any] | None = None,
+        form_body: Mapping[str, str] | None = None,
     ) -> Any:
         """Send with retries for timeouts, network errors and 429/502/503/504."""
         for attempt in range(1, self.retry.max_attempts + 1):
             last_attempt = attempt == self.retry.max_attempts
             try:
-                response = self._client.request(method, path, params=params, json=json_body)
+                response = self._client.request(
+                    method, path, params=params, json=json_body, data=form_body
+                )
             except httpx.TransportError as error:
                 if last_attempt:
                     raise SourceError(
@@ -371,33 +420,146 @@ def iter_erpnext_list(
 # --- Shopify -------------------------------------------------------------------------------
 
 
+ALLOWED_SHOPIFY_SCOPES = frozenset({"read_products", "read_inventory", "read_orders"})
+_SCOPE_HANDLE = re.compile(r"^[a-z_]{1,64}$")
+
+
+def check_scopes(granted: Iterable[str]) -> None:
+    """The app must hold exactly the three read scopes: anything else (above all write_*) could
+    change data, and a missing one would make the data incomplete."""
+    scopes = set(granted)
+    extra = sorted(_printable_scope(s) for s in scopes - ALLOWED_SHOPIFY_SCOPES)
+    missing = sorted(ALLOWED_SHOPIFY_SCOPES - scopes)
+    if extra:
+        raise ConfigurationError(
+            f"The Shopify app has scopes outside {sorted(ALLOWED_SHOPIFY_SCOPES)}: {extra}. "
+            "Reinstall it with the read scopes only; this tool never runs with more."
+        )
+    if missing:
+        raise ConfigurationError(f"The Shopify app is missing required scopes: {missing}.")
+
+
+def _printable_scope(scope: str) -> str:
+    """Scope handles come from Shopify; anything not shaped like a handle is not echoed."""
+    return scope if _SCOPE_HANDLE.fullmatch(scope) else "<unrecognised scope>"
+
+
+TOKEN_REFRESH_MARGIN = 300.0
+"""Seconds before expiry at which a new token is requested."""
+_CREDENTIALS_REJECTED = (400, 401, 403)
+
+
+class ShopifyAccessToken:
+    """Admin API token from the client-credentials grant. Held in memory only, as SecretStr;
+    renewed shortly before it expires. Never logged, printed or stored."""
+
+    def __init__(
+        self,
+        client: ReadOnlyClient,
+        client_id: SecretStr,
+        client_secret: SecretStr,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._client = client
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._clock = clock
+        self._token: SecretStr | None = None
+        self._refresh_at = 0.0
+
+    def get(self) -> SecretStr:
+        if self._token is None or self._clock() >= self._refresh_at:
+            self._token = self._request()
+        return self._token
+
+    def _request(self) -> SecretStr:
+        started = self._clock()
+        form = {
+            "grant_type": "client_credentials",
+            "client_id": self._client_id.get_secret_value(),
+            "client_secret": self._client_secret.get_secret_value(),
+        }
+        try:
+            body = self._client.request_json("POST", SHOPIFY_TOKEN_PATH, form_body=form)
+        except SourceError as error:
+            if error.status_code in _CREDENTIALS_REJECTED:
+                raise ConfigurationError(
+                    f"Shopify rejected the app credentials (HTTP {error.status_code}); check "
+                    "SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET and that the app is installed."
+                ) from None
+            raise
+        token, lifetime = _token_fields(body)
+        self._refresh_at = started + lifetime - min(TOKEN_REFRESH_MARGIN, lifetime / 2)
+        return token
+
+
+def _token_fields(body: object) -> tuple[SecretStr, int]:
+    where = f"POST {SHOPIFY_TOKEN_PATH}"
+    if not isinstance(body, dict):
+        raise IncompleteResponse(f"{where}: response is not an object")
+    token = body.get("access_token")
+    lifetime = body.get("expires_in")
+    if not isinstance(token, str) or not token:
+        raise IncompleteResponse(f"{where}: no access_token")
+    if type(lifetime) is not int or lifetime <= 0:
+        raise IncompleteResponse(f"{where}: expires_in is not a positive integer")
+    scope = body.get("scope")
+    if scope is not None:
+        if not isinstance(scope, str):
+            raise IncompleteResponse(f"{where}: scope is not a string")
+        check_scopes(part.strip() for part in scope.split(",") if part.strip())
+    return SecretStr(token), lifetime
+
+
+class _ShopifyTokenAuth(httpx.Auth):
+    """Adds the current access token to each GraphQL request (also on every retry)."""
+
+    def __init__(self, token: ShopifyAccessToken) -> None:
+        self._token = token
+
+    def auth_flow(self, request: httpx.Request) -> Iterator[httpx.Request]:
+        request.headers["X-Shopify-Access-Token"] = self._token.get().get_secret_value()
+        yield request
+
+
 def shopify_client(
     store_domain: str,
-    token: SecretStr,
+    client_id: SecretStr,
+    client_secret: SecretStr,
     api_version: str,
     *,
     retry: RetryPolicy | None = None,
     transport: httpx.BaseTransport | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> "ShopifyGraphQL":
+    """Two clients behind the same guard: one only fetches tokens (no token header), the other
+    sends GraphQL queries with the current token."""
+    policy = shopify_policy(store_domain, api_version, client_id.get_secret_value())
+    inner = transport or httpx.HTTPTransport()
+    base_url = f"https://{store_domain}"
+    headers = {"Accept": "application/json"}
+    token_client = ReadOnlyClient(base_url, headers, policy, retry=retry, transport=inner)
+    token = ShopifyAccessToken(token_client, client_id, client_secret, clock)
     client = ReadOnlyClient(
-        f"https://{store_domain}",
-        {"X-Shopify-Access-Token": token.get_secret_value(), "Accept": "application/json"},
-        shopify_policy(store_domain, api_version),
-        retry=retry,
-        transport=transport,
+        base_url, headers, policy, retry=retry, transport=inner, auth=_ShopifyTokenAuth(token)
     )
-    return ShopifyGraphQL(client, f"/admin/api/{api_version}/graphql.json")
+    return ShopifyGraphQL(client, f"/admin/api/{api_version}/graphql.json", (token_client,))
 
 
 class ShopifyGraphQL:
     """GraphQL queries with THROTTLED handling. Any GraphQL error fails the whole call."""
 
-    def __init__(self, client: ReadOnlyClient, path: str) -> None:
+    def __init__(
+        self, client: ReadOnlyClient, path: str, also_close: tuple[ReadOnlyClient, ...] = ()
+    ) -> None:
         self._client = client
         self._path = path
+        self._also_close = also_close
 
     def close(self) -> None:
         self._client.close()
+        for client in self._also_close:
+            client.close()
 
     def __enter__(self) -> "ShopifyGraphQL":
         return self
