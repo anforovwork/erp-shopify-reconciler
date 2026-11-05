@@ -28,7 +28,9 @@ class Settings(BaseSettings):
 
     # Shopify
     shopify_store_domain: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*\.myshopify\.com$")
-    shopify_admin_token: SecretStr
+    shopify_client_id: SecretStr
+    shopify_client_secret: SecretStr
+    """Dev Dashboard app credentials; the short-lived access token is fetched at run time."""
     shopify_api_version: str = Field(pattern=r"^\d{4}-(01|04|07|10)$")
     shopify_location_id: str = Field(pattern=r"^gid://shopify/Location/\d+$")
 

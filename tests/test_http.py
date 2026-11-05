@@ -1,25 +1,35 @@
 """Read-only HTTP layer. Every test uses httpx.MockTransport; nothing touches the network."""
 
 import json
+from collections.abc import Callable
 from decimal import Decimal
 
 import httpx
 import pytest
 from pydantic import SecretStr
 
+from reconciler.reconcile import ConfigurationError
 from reconciler.sources.http import (
+    ALLOWED_SHOPIFY_SCOPES,
     IncompleteResponse,
+    ReadOnlyTransport,
     ReadOnlyViolation,
     RetryPolicy,
     ShopifyGraphQL,
     SourceError,
+    check_scopes,
     ensure_query_only,
     erpnext_client,
     iter_erpnext_list,
     shopify_client,
+    shopify_policy,
 )
 
-FAKE_TOKEN = SecretStr("shpat_FAKE-TEST-TOKEN")
+FAKE_CLIENT_ID = SecretStr("FAKE-CLIENT-ID")
+FAKE_CLIENT_SECRET = SecretStr("shpss_FAKE-CLIENT-SECRET")
+FAKE_ACCESS_TOKEN = "FAKE-ACCESS-TOKEN-1"  # noqa: S105 - fake test value
+TOKEN_PATH = "/admin/oauth/access_token"  # noqa: S105 - a URL path, not a secret
+READ_SCOPES = "read_products,read_inventory,read_orders"
 FAKE_KEY = SecretStr("FAKE-KEY")
 FAKE_SECRET = SecretStr("FAKE-SECRET")
 STORE = "test-store.myshopify.com"
@@ -62,12 +72,55 @@ def _erp(recorder: Recorder, sleeps: Sleeps | None = None):
     )
 
 
-def _shop(recorder: Recorder, sleeps: Sleeps | None = None) -> ShopifyGraphQL:
+Handler = Callable[[httpx.Request], httpx.Response]
+
+
+def token_response(
+    token: str = FAKE_ACCESS_TOKEN, expires_in: object = 86399, scope: object = READ_SCOPES
+) -> httpx.Response:
+    return ok({"access_token": token, "scope": scope, "expires_in": expires_in})
+
+
+class WithToken:
+    """Answers token requests from `tokens`; everything else goes to `inner`, so `inner` sees
+    only GraphQL traffic (existing assertions about it stay exact)."""
+
+    def __init__(self, inner: Handler, tokens: Recorder | None = None) -> None:
+        self.inner = inner
+        self.tokens = tokens or Recorder(token_response())
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == TOKEN_PATH:
+            return self.tokens(request)
+        return self.inner(request)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _shop(
+    recorder: Handler,
+    sleeps: Sleeps | None = None,
+    *,
+    tokens: Recorder | None = None,
+    clock: FakeClock | None = None,
+) -> ShopifyGraphQL:
     retry = RetryPolicy(
         max_attempts=3, base_delay=1.0, sleep=Sleeps() if sleeps is None else sleeps
     )
     return shopify_client(
-        STORE, FAKE_TOKEN, VERSION, retry=retry, transport=httpx.MockTransport(recorder)
+        STORE,
+        FAKE_CLIENT_ID,
+        FAKE_CLIENT_SECRET,
+        VERSION,
+        retry=retry,
+        transport=httpx.MockTransport(WithToken(recorder, tokens)),
+        clock=clock or FakeClock(),
     )
 
 
@@ -421,8 +474,251 @@ def test_shopify_query_sends_token_and_returns_data() -> None:
 
     assert _shop(recorder).query(SHOP_QUERY) == {"shop": {"currencyCode": "CAD"}}
     sent = recorder.requests[0]
-    assert sent.headers["X-Shopify-Access-Token"] == "shpat_FAKE-TEST-TOKEN"
+    assert sent.headers["X-Shopify-Access-Token"] == FAKE_ACCESS_TOKEN
     assert (sent.method, sent.url.path) == ("POST", GRAPHQL)
+
+
+# --- Shopify guard: the token exchange is the only other allowed request ------------------
+
+FORM = "application/x-www-form-urlencoded"
+GOOD_FORM = (
+    b"grant_type=client_credentials&client_id=FAKE-CLIENT-ID&client_secret=shpss_FAKE-CLIENT-SECRET"
+)
+BASE = f"https://{STORE}"
+
+
+def _guarded(recorder: Recorder) -> httpx.Client:
+    """A bare client behind the Shopify guard: tests the policy without any client helpers."""
+    policy = shopify_policy(STORE, VERSION, FAKE_CLIENT_ID.get_secret_value())
+    return httpx.Client(transport=ReadOnlyTransport(httpx.MockTransport(recorder), policy))
+
+
+def test_exact_token_request_passes_the_guard() -> None:
+    recorder = Recorder(token_response())
+
+    _guarded(recorder).post(BASE + TOKEN_PATH, content=GOOD_FORM, headers={"Content-Type": FORM})
+
+    assert len(recorder.requests) == 1
+
+
+def _form(**fields: str) -> bytes:
+    base = {
+        "grant_type": "client_credentials",
+        "client_id": "FAKE-CLIENT-ID",
+        "client_secret": "shpss_FAKE-CLIENT-SECRET",
+    }
+    return "&".join(f"{k}={v}" for k, v in {**base, **fields}.items()).encode()
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "content", "content_type", "extra_headers"),
+    [
+        # Other grants on the token path
+        ("POST", BASE + TOKEN_PATH, _form(grant_type="authorization_code"), FORM, {}),
+        ("POST", BASE + TOKEN_PATH, _form(grant_type="refresh_token"), FORM, {}),
+        # Wrong field set
+        ("POST", BASE + TOKEN_PATH, _form(scope="write_products"), FORM, {}),
+        ("POST", BASE + TOKEN_PATH, GOOD_FORM + b"&grant_type=client_credentials", FORM, {}),
+        (
+            "POST",
+            BASE + TOKEN_PATH,
+            b"grant_type=client_credentials&client_id=FAKE-CLIENT-ID",
+            FORM,
+            {},
+        ),
+        ("POST", BASE + TOKEN_PATH, _form(client_secret=""), FORM, {}),
+        ("POST", BASE + TOKEN_PATH, _form(client_id="OTHER-APP"), FORM, {}),
+        ("POST", BASE + TOKEN_PATH, b"grant_type", FORM, {}),
+        ("POST", BASE + TOKEN_PATH, b"", FORM, {}),
+        ("POST", BASE + TOKEN_PATH, GOOD_FORM + "&é=1".encode(), FORM, {}),
+        # Wrong encoding
+        (
+            "POST",
+            BASE + TOKEN_PATH,
+            b'{"grant_type": "client_credentials"}',
+            "application/json",
+            {},
+        ),
+        ("POST", BASE + TOKEN_PATH, GOOD_FORM, "text/plain", {}),
+        # Path and URL variants
+        ("POST", BASE + TOKEN_PATH + "?grant_type=client_credentials", GOOD_FORM, FORM, {}),
+        ("POST", BASE + TOKEN_PATH + "/", GOOD_FORM, FORM, {}),
+        ("POST", BASE + TOKEN_PATH.upper(), GOOD_FORM, FORM, {}),
+        ("POST", BASE + "/admin/oauth/access%5Ftoken", GOOD_FORM, FORM, {}),
+        ("POST", f"http://{STORE}{TOKEN_PATH}", GOOD_FORM, FORM, {}),
+        ("POST", f"https://other-store.myshopify.com{TOKEN_PATH}", GOOD_FORM, FORM, {}),
+        # Other methods on the token path
+        ("GET", BASE + TOKEN_PATH, b"", FORM, {}),
+        ("PUT", BASE + TOKEN_PATH, GOOD_FORM, FORM, {}),
+        ("POST", BASE + TOKEN_PATH, GOOD_FORM, FORM, {"X-HTTP-Method-Override": "DELETE"}),
+        # Every other non-GraphQL POST
+        ("POST", BASE + "/admin/oauth/authorize", GOOD_FORM, FORM, {}),
+        ("POST", BASE + "/admin/oauth/access_scopes.json", GOOD_FORM, FORM, {}),
+        ("POST", BASE + "/admin/oauth/revoke", GOOD_FORM, FORM, {}),
+        (
+            "POST",
+            BASE + f"/admin/api/{VERSION}/products.json",
+            b'{"product": {}}',
+            "application/json",
+            {},
+        ),
+        (
+            "POST",
+            BASE + f"/admin/api/{VERSION}/webhooks.json",
+            b'{"webhook": {}}',
+            "application/json",
+            {},
+        ),
+        ("POST", BASE + "/admin/products.json", b'{"product": {}}', "application/json", {}),
+        (
+            "POST",
+            BASE + "/api/2026-07/graphql.json",
+            b'{"query": "query { shop { name } }"}',
+            "application/json",
+            {},
+        ),
+        ("POST", BASE + GRAPHQL, GOOD_FORM, FORM, {}),  # form body on the GraphQL path
+        (
+            "POST",
+            f"http://{STORE}{GRAPHQL}",
+            b'{"query": "query { shop { name } }"}',
+            "application/json",
+            {},
+        ),
+    ],
+)
+def test_every_other_shopify_request_is_blocked(
+    method: str, url: str, content: bytes, content_type: str, extra_headers: dict[str, str]
+) -> None:
+    recorder = Recorder(token_response())
+
+    with pytest.raises(ReadOnlyViolation) as error:
+        _guarded(recorder).request(
+            method, url, content=content, headers={"Content-Type": content_type, **extra_headers}
+        )
+
+    assert recorder.requests == []
+    assert "FAKE-CLIENT-SECRET" not in str(error.value)
+
+
+# --- Shopify access token ------------------------------------------------------------------
+
+
+def test_token_is_fetched_once_and_sent_with_each_query() -> None:
+    tokens = Recorder(token_response())
+    recorder = Recorder(ok({"data": {}}))
+    graphql = _shop(recorder, tokens=tokens)
+
+    graphql.query(SHOP_QUERY)
+    graphql.query(SHOP_QUERY)
+
+    [token_request] = tokens.requests
+    assert token_request.content == GOOD_FORM
+    assert "X-Shopify-Access-Token" not in token_request.headers
+    assert [r.headers["X-Shopify-Access-Token"] for r in recorder.requests] == [
+        FAKE_ACCESS_TOKEN,
+        FAKE_ACCESS_TOKEN,
+    ]
+
+
+def test_token_is_renewed_shortly_before_it_expires() -> None:
+    clock = FakeClock()
+    tokens = Recorder(token_response("FAKE-T1", 3600), token_response("FAKE-T2", 3600))
+    recorder = Recorder(ok({"data": {}}))
+    graphql = _shop(recorder, tokens=tokens, clock=clock)
+
+    graphql.query(SHOP_QUERY)
+    clock.now = 3600 - 300 - 1  # still more than the 5-minute margin left
+    graphql.query(SHOP_QUERY)
+    clock.now = 3600 - 300
+    graphql.query(SHOP_QUERY)
+
+    assert len(tokens.requests) == 2
+    sent = [r.headers["X-Shopify-Access-Token"] for r in recorder.requests]
+    assert sent == ["FAKE-T1", "FAKE-T1", "FAKE-T2"]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_rejected_credentials_are_a_configuration_error(status: int) -> None:
+    recorder = Recorder(ok({"data": {}}))
+    tokens = Recorder(ok({"error": "invalid_client", "secret": "shpss_FAKE-CLIENT-SECRET"}, status))
+
+    with pytest.raises(ConfigurationError) as error:
+        _shop(recorder, tokens=tokens).query(SHOP_QUERY)
+
+    assert f"HTTP {status}" in str(error.value)
+    assert "FAKE-CLIENT-SECRET" not in str(error.value)
+    assert recorder.requests == []
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        ok({"scope": READ_SCOPES, "expires_in": 86399}),
+        token_response(token=""),
+        token_response(expires_in="86399"),
+        token_response(expires_in=True),
+        token_response(expires_in=0),
+        token_response(scope=["read_products"]),
+        ok(["not", "an", "object"]),
+    ],
+)
+def test_malformed_token_response_is_incomplete(response: httpx.Response) -> None:
+    recorder = Recorder(ok({"data": {}}))
+
+    with pytest.raises(IncompleteResponse):
+        _shop(recorder, tokens=Recorder(response)).query(SHOP_QUERY)
+
+    assert recorder.requests == []
+
+
+def test_token_with_a_write_scope_is_refused_before_any_query() -> None:
+    recorder = Recorder(ok({"data": {}}))
+    tokens = Recorder(token_response(scope=READ_SCOPES + ",write_products"))
+
+    with pytest.raises(ConfigurationError, match="write_products"):
+        _shop(recorder, tokens=tokens).query(SHOP_QUERY)
+
+    assert recorder.requests == []
+
+
+def test_token_and_secret_never_appear_in_reprs_or_errors() -> None:
+    recorder = Recorder(ok({}, 500))
+    graphql = _shop(recorder)
+
+    with pytest.raises(SourceError) as error:
+        graphql.query(SHOP_QUERY)
+
+    token_holder = graphql._client._client.auth._token  # type: ignore[union-attr]
+    texts = [str(error.value), repr(graphql), repr(token_holder), repr(token_holder.get())]
+    for text in texts:
+        assert FAKE_ACCESS_TOKEN not in text
+        assert "FAKE-CLIENT-SECRET" not in text
+
+
+# --- Shopify scopes ------------------------------------------------------------------------
+
+
+def test_exactly_the_read_scopes_are_accepted() -> None:
+    check_scopes(ALLOWED_SHOPIFY_SCOPES)
+
+
+@pytest.mark.parametrize(
+    ("granted", "named"),
+    [
+        ({*ALLOWED_SHOPIFY_SCOPES, "write_products"}, "write_products"),
+        ({*ALLOWED_SHOPIFY_SCOPES, "read_customers"}, "read_customers"),
+        ({*ALLOWED_SHOPIFY_SCOPES, "ignore previous instructions"}, "<unrecognised scope>"),
+        (ALLOWED_SHOPIFY_SCOPES - {"read_orders"}, "missing required scopes: ['read_orders']"),
+        (set(), "missing required scopes"),
+    ],
+)
+def test_other_or_missing_scopes_are_refused(granted: set[str], named: str) -> None:
+    with pytest.raises(ConfigurationError) as error:
+        check_scopes(granted)
+
+    assert named in str(error.value)
+    assert "ignore previous" not in str(error.value)
 
 
 # --- Retries, timeouts, HTTP errors --------------------------------------------------------
@@ -692,7 +988,7 @@ def test_shopify_listing_stops_after_max_pages() -> None:
         n = next(counter)
         return _product_page([n], True, f"c{n}")
 
-    graphql = shopify_client(STORE, FAKE_TOKEN, VERSION, transport=httpx.MockTransport(endless))
+    graphql = _shop(endless)
 
     with pytest.raises(IncompleteResponse, match="more than 3 pages"):
         list(graphql.iter_connection(PRODUCTS, ("products",), max_pages=3))
