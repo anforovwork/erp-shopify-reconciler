@@ -1,0 +1,7 @@
+{"nodes": [
+  {"id": "gid://shopify/Order/1001", "createdAt": "2026-10-30T15:00:00Z", "displayFinancialStatus": "PAID", "cancelledAt": null, "test": false},
+  {"id": "gid://shopify/Order/1002", "createdAt": "2026-10-30T16:00:00Z", "displayFinancialStatus": "PAID", "cancelledAt": "2026-10-31T09:00:00Z", "test": false},
+  {"id": "gid://shopify/Order/1003", "createdAt": "2026-10-31T10:00:00Z", "displayFinancialStatus": "PENDING", "cancelledAt": null, "test": false},
+  {"id": "gid://shopify/Order/1004", "createdAt": "2026-10-31T11:00:00Z", "displayFinancialStatus": "PAID", "cancelledAt": null, "test": true},
+  {"id": "gid://shopify/Order/1005", "createdAt": "2026-10-31T12:00:00-06:00", "displayFinancialStatus": null, "cancelledAt": null, "test": false}
+]}
