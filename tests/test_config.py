@@ -8,12 +8,13 @@ from reconciler.config import Settings, load_settings
 from reconciler.reconcile import ConfigurationError
 
 ENV_EXAMPLE = Path(__file__).resolve().parent.parent / ".env.example"
-FAKE_TOKEN = "shpat_FAKE0000000000000000000000"  # noqa: S105 - fake test value
+FAKE_CLIENT_SECRET = "shpss_FAKE0000000000000000000000"  # noqa: S105 - fake test value
 FAKE_SECRET = "FAKE-ERP-SECRET-0000"  # noqa: S105 - fake test value
 
 VALID_ENV = {
     "SHOPIFY_STORE_DOMAIN": "test-store.myshopify.com",
-    "SHOPIFY_ADMIN_TOKEN": FAKE_TOKEN,
+    "SHOPIFY_CLIENT_ID": "FAKE-CLIENT-ID-0000",
+    "SHOPIFY_CLIENT_SECRET": FAKE_CLIENT_SECRET,
     "SHOPIFY_API_VERSION": "2026-07",
     "SHOPIFY_LOCATION_ID": "gid://shopify/Location/123",
     "ERPNEXT_URL": "http://localhost:8080",
@@ -47,14 +48,15 @@ def test_valid_environment_loads(env: pytest.MonkeyPatch) -> None:
     assert settings.erpnext_prices_include_tax is None
     assert settings.erpnext_order_id_field is None
     assert settings.order_lookback_days == 30
-    assert isinstance(settings.shopify_admin_token, SecretStr)
+    assert isinstance(settings.shopify_client_id, SecretStr)
+    assert isinstance(settings.shopify_client_secret, SecretStr)
 
 
 def test_secrets_never_appear_in_repr_or_dump(env: pytest.MonkeyPatch) -> None:
     settings = load_settings(env_file=None)
 
     for text in (repr(settings), str(settings), settings.model_dump_json()):
-        assert FAKE_TOKEN not in text
+        assert FAKE_CLIENT_SECRET not in text
         assert FAKE_SECRET not in text
 
 
@@ -119,19 +121,20 @@ def test_database_setting_is_required(env: pytest.MonkeyPatch) -> None:
 
 
 def test_missing_required_value_is_named(env: pytest.MonkeyPatch) -> None:
-    env.delenv("SHOPIFY_ADMIN_TOKEN")
+    env.delenv("SHOPIFY_CLIENT_SECRET")
 
-    with pytest.raises(ConfigurationError, match="SHOPIFY_ADMIN_TOKEN: Field required"):
+    with pytest.raises(ConfigurationError, match="SHOPIFY_CLIENT_SECRET: Field required"):
         load_settings(env_file=None)
 
 
 def test_error_message_never_contains_input_values(env: pytest.MonkeyPatch) -> None:
-    env.setenv("SHOPIFY_STORE_DOMAIN", f"{FAKE_TOKEN}.example.com")  # secret pasted by mistake
+    # A secret pasted into the wrong setting by mistake
+    env.setenv("SHOPIFY_STORE_DOMAIN", f"{FAKE_CLIENT_SECRET}.example.com")
 
     with pytest.raises(ConfigurationError) as error:
         load_settings(env_file=None)
 
-    assert FAKE_TOKEN not in str(error.value)
+    assert FAKE_CLIENT_SECRET not in str(error.value)
     assert error.value.__cause__ is None
 
 
