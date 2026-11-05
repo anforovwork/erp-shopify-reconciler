@@ -1,36 +1,60 @@
 # erp-shopify-reconciler
 
-**One trusted answer for every number.** A read-only tool that finds where Shopify and ERPNext disagree —
-prices, stock levels, missing products and missing orders — and tells you which system is right.
-Includes a read-only MCP server so anyone can ask Claude _"which SKUs have a stock mismatch?"_
+**One trusted answer when Shopify and ERPNext disagree on price, stock or orders.**
 
-> Status: in development. Built with Claude Code; every change reviewed and tested by me. Time log: [HOURS.md](HOURS.md).
+A read-only tool that compares the storefront (Shopify) with the ERP (ERPNext), reports every
+mismatch with the system that is right and a suggested fix, and exposes the results to Claude
+through a read-only MCP server. Built Claude Code-first — see [How I built it](#how-i-built-it).
+Time log: [HOURS.md](HOURS.md).
 
-## Why
+## Demo result
 
-When a business runs a storefront and an ERP side by side, the two drift apart: a price changed in one place,
-stock counted in the warehouse but not pushed to the store, an order that never reached the ERP.
-Each mismatch is lost money or a disappointed customer. This tool finds them before customers do.
+A live run against a local ERPNext and a Shopify dev store loaded with the same 300 synthetic
+products (`DEMO-BOS-*` SKUs), after a few edits in Shopify only.
+Full report: [docs/sample-report.md](docs/sample-report.md).
+
+| Finding | SKU | Shopify | ERPNext | Suggested action |
+|---|---|---|---|---|
+| `MISSING_IN_SHOPIFY` | DEMO-BOS-0150 | — | — | Create it in Shopify, or move the ERPNext item out of the online item groups |
+| `MISSING_IN_ERP` | DEMO-BOS-9999 | — | — | Create the ERPNext item, or correct the Shopify SKU |
+| `PRICE_MISMATCH` | DEMO-BOS-0001 | 479.99 | 499.99 | Set the Shopify price to the ERPNext price |
+| `PRICE_MISMATCH` | DEMO-BOS-0100 | 22.99 | 21.99 | Set the Shopify price to the ERPNext price |
+| `STOCK_MISMATCH` | DEMO-BOS-0002 | 15 | 18 | Confirm the ERPNext count, then set Shopify on-hand to match |
+| `STOCK_MISMATCH` | DEMO-BOS-0300 | 0 | 11 | Confirm the ERPNext count, then set Shopify on-hand to match |
+
+- 6 discrepancies → **exit code 1**. ERPNext is the source of truth for all six.
+- Same stores before the edits (identical data): **0 discrepancies across 300 SKUs**, exit code 0.
+- The order check was skipped (and shown as skipped) because the demo ERPNext has no Sales Order
+  field for the Shopify order ID yet.
 
 ## Safety by design
 
-- **Read-only** against both systems, enforced twice: by the credentials (Shopify read scopes only,
-  checked at startup; ERPNext [read-only role](docs/erpnext-readonly-user.md)) and by the HTTP layer
-  (ERPNext `GET` only; Shopify GraphQL queries only, mutations rejected).
-- **No secrets in the repo** — environment variables only. Gitleaks scans staged changes on every commit
-  (pre-commit hook) and the full history in CI after every push.
-- **MCP tools return reports, never take actions** (stdio only, minimal structured data, no customer
-  details); store data is treated as untrusted text (prompt-injection defence).
-- **No real customer data** — test data is generated.
+- **Read-only guard in the HTTP transport** ([`sources/http.py`](src/reconciler/sources/http.py)),
+  so no client code can bypass it. ERPNext: `GET` on `/api/resource/...` only, no request body,
+  no `run_method`/`cmd`, no method-override headers, paths checked after URL decoding. Shopify:
+  `POST` only to the GraphQL endpoint, and only if graphql-core parses the document as exactly one
+  query (mutations and subscriptions are rejected). Only the configured host; redirects never followed.
+- **Exact scopes.** The Shopify app must hold exactly `read_products`, `read_inventory`,
+  `read_orders`, checked at startup; any `write_*` scope stops the run. ERPNext uses a
+  [dedicated read-only user](docs/erpnext-readonly-user.md).
+- **Secrets never logged.** Credentials come only from `.env` (git-ignored) as `SecretStr`; the
+  Shopify access token lives in memory only; error messages name fields, never values.
+- **Gitleaks** scans staged changes on every commit (pre-commit hook) and the full history in CI.
+- **Prompt-injection handling.** SKUs and other store data are treated as untrusted text; the MCP
+  server instructions and every tool description tell Claude to treat them as data, never
+  instructions. Tools return minimal structured data — no customer details or free text.
+- **MCP reads snapshots only.** The server (stdio) reads saved snapshots, imports nothing from the
+  API clients, never loads `.env` and cannot contact Shopify or ERPNext.
 
 ## Source of truth
 
-| Data | Owner |
-|---|---|
-| Products, prices, stock | ERPNext |
-| Orders | Shopify |
+| Data | Owner | Why |
+|---|---|---|
+| Products, SKUs, prices, stock | ERPNext | Item master, finance pricing, warehouse counts |
+| Orders | Shopify | Orders originate in the store |
 
-See [docs/data-dictionary.md](docs/data-dictionary.md).
+Rules in detail: [CLAUDE.md](CLAUDE.md#reconciliation-rules-v1-decided-2026-11-01) and
+[docs/data-dictionary.md](docs/data-dictionary.md). Design: [docs/architecture.md](docs/architecture.md).
 
 ## Quick start (Linux / WSL2)
 
@@ -52,13 +76,25 @@ echo $?                          # 0 = all agree, 1 = discrepancies found, 2 = e
 
 ## Ask Claude (MCP server)
 
-`reconcile-mcp` is a read-only MCP server (stdio). Its three tools — `get_summary`,
-`list_discrepancies` and `explain_sku` — read the **newest snapshot** in `reports/` that
-`reconcile run` saved. They never contact Shopify or ERPNext and cannot change anything, so answers
-are only as fresh as the last run: every answer includes the snapshot time and its age. Run
-`reconcile run` again for current data.
+`reconcile-mcp` is a read-only MCP server (stdio) with three tools — `get_summary`,
+`list_discrepancies` and `explain_sku`. They read the **newest snapshot** that `reconcile run`
+saved in `reports/`, so every answer includes the snapshot time and its age.
 
-Replace `<you>` with your Ubuntu user name in the paths below.
+Example exchange from the demo snapshot:
+
+> **Q:** Which SKUs have a stock mismatch, and what should we do about them?
+>
+> **A:** Two SKUs don't match. DEMO-BOS-0002 shows 15 in Shopify but 18 in ERPNext. DEMO-BOS-0300
+> shows 0 in Shopify but 11 in ERPNext. ERPNext is the source of truth here. Check the ERPNext
+> warehouse count for each SKU, then set Shopify's on-hand stock to match it. Do DEMO-BOS-0300
+> first: Shopify probably shows it as sold out while 11 are in stock, so you could be losing sales.
+> These numbers come from the snapshot taken 30 minutes ago (03:19 UTC), so run `reconcile run`
+> again before you change anything.
+
+Other questions: _"Summarise the last reconciliation. How old is the data?"_ ·
+_"Why is DEMO-BOS-0001 flagged, and which system is right?"_
+
+Setup (replace `<you>` with your Ubuntu user name).
 
 **Claude Code (in Ubuntu):**
 
@@ -88,13 +124,46 @@ Check the distribution name with `wsl -l -v` in PowerShell.
 }
 ```
 
-**Example questions:**
-
-- _"Which SKUs have a stock mismatch?"_
-- _"Summarise the last reconciliation. How old is the data?"_
-- _"Why is SKU FAKE-PRICE-1 flagged, and which system is right?"_
-
 ## How I built it
 
-_To be written: process (plan → Claude implements → I review the diff → tests → secret scan → merge),
-what Claude got wrong and how I caught it, total hours._
+Built with Claude Code. Every task followed the same loop:
+
+**rules in [CLAUDE.md](CLAUDE.md)** → **plan mode** → **I answer the business questions** →
+**Claude implements** → **tests + ruff + gitleaks** → **smoke tests against the real systems** →
+**PR** → **merge**.
+
+My part: I set the rules (CLAUDE.md), made every business decision, approved each plan, and
+verified the results against live ERPNext and a Shopify dev store. A line-by-line code walkthrough
+is the next step.
+
+### Things found along the way
+
+- **"GET only" was wrong for Shopify.** Shopify GraphQL reads are HTTP `POST`, so the original
+  rule could not work; the guard now allows `POST` only for parsed, query-only GraphQL documents
+  (`58d8e9f`).
+- **A GET body could smuggle `run_method`.** Frappe builds request data from a JSON body even on
+  `GET`, so ERPNext requests may not carry a body at all (`f439cd7`).
+- **Price selection depends on the database.** ERPNext's price choice was reproduced from the
+  installed v16.53 source; it relies on MariaDB's NULL ordering, so the database type is a required
+  setting (`2658ae3`, `8730da5`).
+- **Shopify's search index can lag**, so `ACTIVE` products are filtered in code, not via search.
+- **The mcp 2.x SDK no longer ships FastMCP**; the server uses `MCPServer`.
+- **Setting up the dev store:** the first app version had no scopes at all (caught before
+  install); deactivating a location moved all stock to another location (verified 20/20 SKUs
+  against the import file, then switched the configured location); the store currency was USD
+  instead of CAD, which the startup currency check would have refused.
+
+## What I would do in production
+
+- **Scheduled runs** (cron or GitHub Actions) with an alert whenever the exit code is 1.
+- **Order reconciliation:** add the Sales Order custom field for the Shopify order ID in ERPNext
+  (by hand — the tool never creates it) and set `ERPNEXT_ORDER_ID_FIELD`.
+- **`INCLUDE_TEST_ORDERS` for dev stores**, enabled only after the tool verifies it is connected to
+  an approved development store (rule in CLAUDE.md; not implemented yet).
+- **Snapshot history** to show trends: which mismatches recur and how fast they get fixed.
+- **Load and pagination limits** tested for peak-season catalogue and order volumes.
+- **A dedicated read-only ERPNext role** per [docs/erpnext-readonly-user.md](docs/erpnext-readonly-user.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
