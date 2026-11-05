@@ -25,8 +25,8 @@ Full report: [docs/sample-report.md](docs/sample-report.md).
 
 | Finding | SKU | Shopify | ERPNext | Suggested action |
 |---|---|---|---|---|
-| `MISSING_IN_SHOPIFY` | DEMO-BOS-0150 | — | — | Create it in Shopify, or move the ERPNext item out of the online item groups |
-| `MISSING_IN_ERP` | DEMO-BOS-9999 | — | — | Create the ERPNext item, or correct the Shopify SKU |
+| `MISSING_IN_SHOPIFY` | DEMO-BOS-0150 | not active | in catalogue | Create it in Shopify, or move the ERPNext item out of the online item groups |
+| `MISSING_IN_ERP` | DEMO-BOS-9999 | active | no item | Create the ERPNext item, or correct the Shopify SKU |
 | `PRICE_MISMATCH` | DEMO-BOS-0001 | 479.99 | 499.99 | Set the Shopify price to the ERPNext price |
 | `PRICE_MISMATCH` | DEMO-BOS-0100 | 22.99 | 21.99 | Set the Shopify price to the ERPNext price |
 | `STOCK_MISMATCH` | DEMO-BOS-0002 | 15 | 18 | Confirm the ERPNext count, then set Shopify on-hand to match |
@@ -200,7 +200,8 @@ with live runs against ERPNext and the Shopify dev store.
   an approved development store (rule in CLAUDE.md; not implemented yet).
 - **Snapshot history** to show trends: which mismatches recur and how fast they get fixed.
 - **Load and pagination limits** tested for peak-season catalogue and order volumes.
-- **A dedicated read-only ERPNext role** per [docs/erpnext-readonly-user.md](docs/erpnext-readonly-user.md).
+- **Alerting on failures too**, not only on findings: exit code 2 (configuration or source error)
+  should page someone, because a silent failure looks like "no discrepancies".
 
 ## License
 
