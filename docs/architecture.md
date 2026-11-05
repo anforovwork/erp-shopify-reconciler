@@ -39,3 +39,34 @@ ShopifyGraphQL ────── POST /admin/api/<v>/graphql.json ─► ReadOn
   is refused.
 - **Smoke test.** `scripts/shopify_smoke.py` runs the same path against the real store and prints
   only yes/no checks and counts.
+
+## `reconcile run` (implemented)
+
+```
+load_settings(.env) ─► to_options(as_of = now, UTC)
+  │
+  ├─► fetch_erp_live      ─► ErpData       (sources/erpnext.py, read-only)
+  ├─► fetch_shopify_live  ─► ShopifyData   (sources/shopify.py, read-only)
+  ▼
+reconcile(shopify, erp, options) ─► ReconciliationResult      (pure, no network)
+  ▼
+reports/snapshot-<UTC>.json   options + both data sets + result   (never overwritten)
+reports/latest.md, latest.csv rendered from the result             (replaced atomically)
+```
+
+- **All or nothing.** Outputs are written only after both fetches and `reconcile()` succeed, so
+  a failed run never leaves a partial or stale-looking report. Each file is written to a
+  temporary file and then moved into place. The snapshot is written first and refuses to
+  overwrite an existing file. If two runs fall in the same second, the second one stops before
+  it touches `latest.*`.
+- **Snapshot** (`snapshot.py`). It holds only pydantic models, never `Settings`, so it contains no
+  credentials. Decimals are stored as JSON strings. `load_snapshot` validates it back into the
+  same models, so `reconcile report` (next task) can render it without the network.
+- **Terminal output.** Only timestamps, counts per discrepancy type, skipped/warning counts
+  and the output paths are printed. SKUs, order ids and warning text appear only in the escaped
+  reports. Errors print as `ERROR: <type>: <message>` on stderr; client and config messages name
+  fields, never values.
+- **Exit codes.** `0` no discrepancies, `1` discrepancies found, `2` configuration error, source
+  error, read-only violation or file error.
+- **Files are private.** Reports and snapshots are created readable by the owner only (mode 0600)
+  and are git-ignored (`reports/*`).

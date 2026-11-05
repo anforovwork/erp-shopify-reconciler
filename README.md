@@ -42,6 +42,14 @@ cp .env.example .env   # then fill in your dev-store values
 pytest
 ```
 
+Run a reconciliation (read-only; writes `reports/latest.md`, `reports/latest.csv` and a
+timestamped JSON snapshot, all git-ignored):
+
+```bash
+reconcile run                    # or: reconcile run --report out/r.md --csv out/r.csv
+echo $?                          # 0 = all agree, 1 = discrepancies found, 2 = error
+```
+
 ## How I built it
 
 _To be written: process (plan → Claude implements → I review the diff → tests → secret scan → merge),
