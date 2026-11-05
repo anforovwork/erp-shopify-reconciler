@@ -1,0 +1,4 @@
+{"data": [
+  {"item_code": "TEST-SKU-1", "warehouse": "Test Stores - TC", "actual_qty": 12.0},
+  {"item_code": "TEST-SKU-2", "warehouse": "Test Stores - TC", "actual_qty": 3}
+]}

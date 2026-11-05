@@ -1,1 +1,639 @@
-"""Comparison rules (pure functions, no network). Implemented in a later task."""
+"""Comparison rules (pure functions, no network).
+
+Every function takes already-fetched data and returns findings. Nothing here reads the clock,
+the environment or the network, so every rule can be tested with plain in-memory data.
+"""
+
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from reconciler.models import (
+    CheckName,
+    CurrencyCode,
+    Discrepancy,
+    DiscrepancyType,
+    ErpBin,
+    ErpData,
+    ErpItem,
+    ErpItemPrice,
+    ErpSalesOrder,
+    ReconciliationResult,
+    ShopifyData,
+    ShopifyOrder,
+    ShopifyShop,
+    ShopifyVariant,
+    SkippedCheck,
+    System,
+    TimezoneName,
+    UtcDatetime,
+)
+
+MAX_ORDER_LOOKBACK_DAYS = 60
+"""read_orders only exposes the last 60 days; v1 does not request read_all_orders."""
+
+PRICE_TOLERANCE = Decimal("0.01")
+"""A price difference must be strictly greater than this to count as a mismatch."""
+
+
+class ConfigurationError(Exception):
+    """Settings or system configuration make a reliable comparison impossible."""
+
+
+class ReconcileOptions(BaseModel):
+    """Business settings the rules need; built from configuration by the caller."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    as_of: UtcDatetime
+    """Run time (stored in UTC). The order lookback counts back from it."""
+    price_timezone: TimezoneName
+    """ERPNext site timezone; price validity uses the run date in this timezone."""
+    item_groups: frozenset[str] = Field(min_length=1)
+    price_list: str
+    currency: CurrencyCode
+    erp_prices_include_tax: bool | None
+    warehouse: str
+    unit_uoms: frozenset[str] = Field(min_length=1)
+    order_lookback_days: int = Field(gt=0, le=MAX_ORDER_LOOKBACK_DAYS)
+
+    @property
+    def price_date(self) -> date:
+        return self.as_of.astimezone(ZoneInfo(self.price_timezone)).date()
+
+
+@dataclass
+class Findings:
+    discrepancies: list[Discrepancy] = field(default_factory=list)
+    skipped: list[SkippedCheck] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def extend(self, other: "Findings") -> None:
+        self.discrepancies.extend(other.discrepancies)
+        self.skipped.extend(other.skipped)
+        self.warnings.extend(other.warnings)
+
+
+@dataclass
+class SkuIndex[T]:
+    """Records keyed by normalized SKU. Ambiguous SKUs are kept out of `unique`."""
+
+    unique: dict[str, T]
+    duplicated: dict[str, int]
+    empty: list[T]
+
+
+@dataclass
+class MatchedProduct:
+    variant: ShopifyVariant
+    item: ErpItem
+
+
+def normalize_sku(raw: str | None) -> str:
+    """Trim surrounding whitespace only. SKUs stay case-sensitive."""
+    return (raw or "").strip()
+
+
+def scope_exclusions(item: ErpItem, options: ReconcileOptions) -> list[str]:
+    """Why an ERPNext item is outside the reconciled scope; empty list = in scope."""
+    rules = [
+        (item.disabled, "disabled"),
+        (not item.is_sales_item, "not a sales item"),
+        (not item.is_stock_item, "not a stock item"),
+        (item.has_variants, "variant template"),
+        (item.item_group not in options.item_groups, "item group not in ERPNEXT_ITEM_GROUPS"),
+    ]
+    return [reason for excluded, reason in rules if excluded]
+
+
+def is_in_scope(item: ErpItem, options: ReconcileOptions) -> bool:
+    return not scope_exclusions(item, options)
+
+
+def out_of_scope_reasons(items: Iterable[ErpItem], options: ReconcileOptions) -> dict[str, str]:
+    """Normalized item code -> why it is excluded, for items outside the scope."""
+    reasons: dict[str, set[str]] = {}
+    for item in items:
+        sku = normalize_sku(item.item_code)
+        excluded = scope_exclusions(item, options)
+        if sku and excluded:
+            reasons.setdefault(sku, set()).update(excluded)
+    return {sku: ", ".join(sorted(found)) for sku, found in reasons.items()}
+
+
+def index_by_sku[T](records: Iterable[T], sku_of: Callable[[T], str | None]) -> SkuIndex[T]:
+    groups: dict[str, list[T]] = {}
+    empty: list[T] = []
+    for record in records:
+        sku = normalize_sku(sku_of(record))
+        if sku:
+            groups.setdefault(sku, []).append(record)
+        else:
+            empty.append(record)
+    unique = {sku: group[0] for sku, group in groups.items() if len(group) == 1}
+    duplicated = {sku: len(group) for sku, group in groups.items() if len(group) > 1}
+    return SkuIndex(unique=unique, duplicated=duplicated, empty=empty)
+
+
+def index_shopify_variants(variants: Iterable[ShopifyVariant]) -> SkuIndex[ShopifyVariant]:
+    return index_by_sku(variants, lambda variant: variant.sku)
+
+
+def index_erp_items(items: Iterable[ErpItem], options: ReconcileOptions) -> SkuIndex[ErpItem]:
+    in_scope = (item for item in items if is_in_scope(item, options))
+    return index_by_sku(in_scope, lambda item: item.item_code)
+
+
+def check_sku_quality(
+    shopify: SkuIndex[ShopifyVariant], erp: SkuIndex[ErpItem]
+) -> list[Discrepancy]:
+    findings = [
+        Discrepancy(
+            type=DiscrepancyType.SKU_EMPTY,
+            key=variant.variant_id,
+            source_of_truth=System.ERPNEXT,
+            suggested_action="Set this Shopify variant's SKU to the matching ERPNext item code.",
+        )
+        for variant in shopify.empty
+    ]
+    findings += [
+        Discrepancy(
+            type=DiscrepancyType.SKU_EMPTY,
+            key=item.item_code,
+            source_of_truth=System.ERPNEXT,
+            suggested_action="Fix the ERPNext item code; it is blank after trimming.",
+        )
+        for item in erp.empty
+    ]
+    for system, index in ((System.SHOPIFY, shopify), (System.ERPNEXT, erp)):
+        findings += [
+            _duplicate_sku(sku, count, system) for sku, count in sorted(index.duplicated.items())
+        ]
+    return findings
+
+
+def _duplicate_sku(sku: str, count: int, system: System) -> Discrepancy:
+    return Discrepancy(
+        type=DiscrepancyType.SKU_DUPLICATE,
+        key=sku,
+        source_of_truth=System.ERPNEXT,
+        suggested_action=(
+            f"Make this SKU unique in {_label(system)}; other checks skip it until then."
+        ),
+        detail=f"appears {count} times in {_label(system)}",
+    )
+
+
+def ambiguous_skus(shopify: SkuIndex[ShopifyVariant], erp: SkuIndex[ErpItem]) -> set[str]:
+    return set(shopify.duplicated) | set(erp.duplicated)
+
+
+def match_products(
+    shopify: SkuIndex[ShopifyVariant], erp: SkuIndex[ErpItem]
+) -> dict[str, MatchedProduct]:
+    """SKUs present exactly once on both sides."""
+    ambiguous = ambiguous_skus(shopify, erp)
+    return {
+        sku: MatchedProduct(variant=shopify.unique[sku], item=erp.unique[sku])
+        for sku in sorted(shopify.unique.keys() & erp.unique.keys())
+        if sku not in ambiguous
+    }
+
+
+def check_missing(
+    shopify: SkuIndex[ShopifyVariant],
+    erp: SkuIndex[ErpItem],
+    out_of_scope: dict[str, str],
+) -> Findings:
+    """Missing products. A Shopify SKU whose ERPNext item exists but is out of scope is
+    skipped with the reason; MISSING_IN_ERP is only for codes ERPNext does not have at all."""
+    ambiguous = ambiguous_skus(shopify, erp)
+    missing_in_shopify = sorted(erp.unique.keys() - shopify.unique.keys() - ambiguous)
+    not_in_scope = sorted(shopify.unique.keys() - erp.unique.keys() - ambiguous)
+    findings = Findings()
+    findings.discrepancies += [
+        Discrepancy(
+            type=DiscrepancyType.MISSING_IN_SHOPIFY,
+            key=sku,
+            source_of_truth=System.ERPNEXT,
+            suggested_action=(
+                "Create the product in Shopify, or move the ERPNext item out of the "
+                "configured item groups if it is not sold online."
+            ),
+        )
+        for sku in missing_in_shopify
+    ]
+    for sku in not_in_scope:
+        if sku in out_of_scope:
+            findings.skipped.append(
+                SkippedCheck(
+                    check=CheckName.SCOPE,
+                    key=sku,
+                    reason=f"ERPNext item exists but is out of scope: {out_of_scope[sku]}.",
+                )
+            )
+        else:
+            findings.discrepancies.append(
+                Discrepancy(
+                    type=DiscrepancyType.MISSING_IN_ERP,
+                    key=sku,
+                    source_of_truth=System.ERPNEXT,
+                    suggested_action=(
+                        "No ERPNext item has this code: create the item, or correct the "
+                        "Shopify SKU."
+                    ),
+                )
+            )
+    return findings
+
+
+# --- Prices --------------------------------------------------------------------------------
+#
+# Reproduces ERPNext v16.53.0's selling-price selection (erpnext/stock/get_item_details.py:
+# get_price_list_rate -> get_price_list_rate_for -> get_item_price) for ONE unit in the item's
+# stock UOM, no customer, no batch, on the run date. The SQL it builds (verified on our install):
+#
+#   WHERE item_code = <item> AND price_list = <list> AND IFNULL(uom,'') IN ('', <uom>)
+#     AND IFNULL(batch_no,'') = '' AND IFNULL(customer,'') = '' AND IFNULL(supplier,'') = ''
+#     AND IFNULL(valid_from,'2000-01-01') <= <date> AND IFNULL(valid_upto,'2500-12-31') >= <date>
+#   ORDER BY IFNULL(batch_no,'') DESC, valid_from DESC, uom DESC
+#
+# Python then takes the first row whose packing_unit fits the quantity. If the item has no such
+# row and is a variant, the same lookup runs for its template. There is no tie-breaker after
+# `uom` (not creation, modified or name), so rows that tie on (valid_from, uom) come back in an
+# order the database does not define: ERPNext's choice is not reproducible -> PRICE_AMBIGUOUS.
+
+QUANTITY = 1
+"""Shopify sells one unit at the variant price, so the lookup uses quantity 1."""
+
+
+def validate_currencies(shop_currency: str, price_list_currency: str, configured: str) -> None:
+    """No currency conversion in v1: all three must be equal, otherwise stop."""
+    wrong = [
+        f"{source} uses {currency}"
+        for source, currency in (
+            ("the Shopify store", shop_currency),
+            ("the ERPNext price list", price_list_currency),
+        )
+        if currency != configured
+    ]
+    if wrong:
+        raise ConfigurationError(
+            f"Currency mismatch: CURRENCY is {configured}, but {' and '.join(wrong)}. "
+            "Currency conversion is not supported."
+        )
+
+
+def tax_treatment_matches(shop: ShopifyShop, options: ReconcileOptions) -> bool:
+    return options.erp_prices_include_tax is not None and (
+        options.erp_prices_include_tax == shop.taxes_included
+    )
+
+
+def _blank(value: str | None) -> bool:
+    """IFNULL(x,'') = '' in MariaDB, whose collations ignore trailing spaces."""
+    return not (value or "").strip()
+
+
+def fits_packing_unit(price: ErpItemPrice) -> bool:
+    """ERPNext: `not packing_unit or qty % packing_unit == 0`."""
+    return price.packing_unit == 0 or QUANTITY % price.packing_unit == 0
+
+
+def is_candidate_price(
+    price: ErpItemPrice, item_code: str, uom: str, options: ReconcileOptions
+) -> bool:
+    run_date = options.price_date
+    return (
+        price.item_code == item_code
+        and price.price_list == options.price_list
+        and (_blank(price.uom) or price.uom == uom)
+        and _blank(price.batch_no)
+        and _blank(price.customer)
+        and _blank(price.supplier)
+        and (price.valid_from is None or price.valid_from <= run_date)
+        and (price.valid_upto is None or run_date <= price.valid_upto)
+        and fits_packing_unit(price)
+    )
+
+
+def precedence(price: ErpItemPrice) -> tuple[tuple[bool, date], tuple[bool, str]]:
+    """ERPNext's ORDER BY as a sort key; the highest key wins. MariaDB sorts NULL below every
+    value in DESC order, so a missing valid_from or uom ranks last."""
+    valid_from = (price.valid_from is not None, price.valid_from or date.min)
+    uom = (price.uom is not None, (price.uom or "").strip())
+    return valid_from, uom
+
+
+@dataclass(frozen=True)
+class PriceSelection:
+    selected: ErpItemPrice | None
+    """The row ERPNext would use; None when there is none or the choice is undefined."""
+    tied: tuple[ErpItemPrice, ...] = ()
+    """Rows sharing the top precedence (two or more = ERPNext's choice is undefined)."""
+    without_uom: int = 0
+    """Candidate rows with no UOM (data-quality issue; ERPNext treats them as any UOM)."""
+    from_template: bool = False
+
+
+def select_erp_price(
+    item: ErpItem, prices_by_code: dict[str, list[ErpItemPrice]], options: ReconcileOptions
+) -> PriceSelection:
+    own = _select_for(item.item_code, item.stock_uom, prices_by_code, options)
+    if own is not None or not item.variant_of:
+        return own or PriceSelection(selected=None)
+    template = _select_for(item.variant_of, item.stock_uom, prices_by_code, options)
+    if template is None:
+        return PriceSelection(selected=None)
+    return PriceSelection(
+        selected=template.selected,
+        tied=template.tied,
+        without_uom=template.without_uom,
+        from_template=True,
+    )
+
+
+def _select_for(
+    code: str, uom: str, prices_by_code: dict[str, list[ErpItemPrice]], options: ReconcileOptions
+) -> PriceSelection | None:
+    """None = no candidate row at all (ERPNext then returns no price for this code)."""
+    candidates = [
+        p for p in prices_by_code.get(code, []) if is_candidate_price(p, code, uom, options)
+    ]
+    if not candidates:
+        return None
+    best = max(precedence(p) for p in candidates)
+    top = tuple(p for p in candidates if precedence(p) == best)
+    return PriceSelection(
+        selected=top[0] if len(top) == 1 else None,
+        tied=top if len(top) > 1 else (),
+        without_uom=sum(_blank(p.uom) for p in candidates),
+    )
+
+
+def check_prices(
+    matched: dict[str, MatchedProduct],
+    prices: Iterable[ErpItemPrice],
+    shop: ShopifyShop,
+    options: ReconcileOptions,
+) -> Findings:
+    findings = Findings()
+    compare = tax_treatment_matches(shop, options)
+    if not compare:
+        findings.skipped.append(
+            SkippedCheck(
+                check=CheckName.PRICE,
+                key=None,
+                reason=(
+                    "Price comparison unsupported: ERPNEXT_PRICES_INCLUDE_TAX is not set or "
+                    "does not match Shopify's taxesIncluded setting. Missing and ambiguous "
+                    "prices are still checked."
+                ),
+            )
+        )
+    prices_by_code: dict[str, list[ErpItemPrice]] = {}
+    for price in prices:
+        prices_by_code.setdefault(price.item_code, []).append(price)
+
+    for sku, product in matched.items():
+        selection = select_erp_price(product.item, prices_by_code, options)
+        findings.discrepancies += _price_findings(sku, product.variant.price, selection, compare)
+    return findings
+
+
+def _price_findings(
+    sku: str, shopify_price: Decimal, selection: PriceSelection, compare: bool
+) -> list[Discrepancy]:
+    findings: list[Discrepancy] = []
+    if selection.without_uom:
+        findings.append(
+            Discrepancy(
+                type=DiscrepancyType.PRICE_UOM_MISSING,
+                key=sku,
+                source_of_truth=System.ERPNEXT,
+                suggested_action="Set the UOM on the Item Price row(s); ERPNext v16 requires it.",
+                detail=(
+                    f"{selection.without_uom} applicable price row(s) without UOM "
+                    "(ERPNext treats them as matching any UOM)"
+                ),
+            )
+        )
+    if selection.tied:
+        findings.append(
+            Discrepancy(
+                type=DiscrepancyType.PRICE_AMBIGUOUS,
+                key=sku,
+                shopify_value=shopify_price,
+                source_of_truth=System.ERPNEXT,
+                suggested_action=(
+                    "Remove or end-date (valid_upto) all but one of the tied Item Price rows."
+                ),
+                detail=(
+                    f"{len(selection.tied)} price rows tie on valid_from and UOM; ERPNext's "
+                    "choice between them is undefined, so prices were not compared"
+                ),
+            )
+        )
+    elif selection.selected is None:
+        findings.append(
+            Discrepancy(
+                type=DiscrepancyType.PRICE_MISSING,
+                key=sku,
+                shopify_value=shopify_price,
+                source_of_truth=System.ERPNEXT,
+                suggested_action=(
+                    "Add an Item Price on the configured selling price list (stock UOM, no "
+                    "customer, no batch, valid today)."
+                ),
+            )
+        )
+    elif compare and abs(shopify_price - selection.selected.price_list_rate) > PRICE_TOLERANCE:
+        findings.append(
+            Discrepancy(
+                type=DiscrepancyType.PRICE_MISMATCH,
+                key=sku,
+                shopify_value=shopify_price,
+                erp_value=selection.selected.price_list_rate,
+                source_of_truth=System.ERPNEXT,
+                suggested_action="Update the Shopify price to the ERPNext price.",
+                detail="ERPNext price inherited from the template item"
+                if selection.from_template
+                else "",
+            )
+        )
+    return findings
+
+
+# --- Stock ---------------------------------------------------------------------------------
+
+
+NO_BIN_UNCONFIRMED = (
+    "No ERPNext Bin row, and the warehouse or the Bin data was not confirmed complete; "
+    "not assuming zero stock."
+)
+
+
+def check_stock(
+    matched: dict[str, MatchedProduct],
+    bins: Iterable[ErpBin],
+    options: ReconcileOptions,
+    *,
+    bins_trustworthy: bool,
+) -> Findings:
+    """Shopify on_hand at the configured location vs ERPNext Bin actual_qty in the warehouse.
+
+    A missing Bin row means zero (ERPNext creates a Bin on the first stock transaction), but only
+    when `bins_trustworthy`: the warehouse exists and every Bin page was retrieved.
+    """
+    erp_qty = {b.item_code: b.actual_qty for b in bins if b.warehouse == options.warehouse}
+    findings = Findings()
+    for sku, product in matched.items():
+        bin_qty = erp_qty.get(product.item.item_code)
+        reason = _stock_skip_reason(product, bin_qty, options, bins_trustworthy)
+        qty = Decimal(0) if bin_qty is None else bin_qty
+        if reason:
+            findings.skipped.append(SkippedCheck(check=CheckName.STOCK, key=sku, reason=reason))
+        elif Decimal(product.variant.on_hand or 0) != qty:
+            findings.discrepancies.append(
+                Discrepancy(
+                    type=DiscrepancyType.STOCK_MISMATCH,
+                    key=sku,
+                    shopify_value=Decimal(product.variant.on_hand or 0),
+                    erp_value=qty,
+                    source_of_truth=System.ERPNEXT,
+                    suggested_action=(
+                        "Confirm the ERPNext warehouse count, then set Shopify on-hand "
+                        "inventory to match it."
+                    ),
+                )
+            )
+    return findings
+
+
+def _stock_skip_reason(
+    product: MatchedProduct,
+    bin_qty: Decimal | None,
+    options: ReconcileOptions,
+    bins_trustworthy: bool,
+) -> str | None:
+    """First reason the stock check cannot run, most specific first; None = compare."""
+    if not product.variant.inventory_tracked:
+        return "Inventory is not tracked in Shopify for this variant."
+    if product.variant.on_hand is None:
+        return "Variant is not stocked at the configured Shopify location."
+    if product.item.stock_uom not in options.unit_uoms:
+        return "ERPNext stock UOM is not in ERPNEXT_UNIT_UOMS, so units are not comparable."
+    if bin_qty is None and not bins_trustworthy:
+        return NO_BIN_UNCONFIRMED
+    if bin_qty is not None and bin_qty != bin_qty.to_integral_value():
+        return "ERPNext quantity is fractional; Shopify counts whole units."
+    return None
+
+
+# --- Orders --------------------------------------------------------------------------------
+
+ORDER_CHECK_DISABLED = (
+    "Order reconciliation disabled: ERPNEXT_ORDER_ID_FIELD is not configured or the field "
+    "does not exist on ERPNext Sales Order. The tool does not create it."
+)
+SUBMITTED = 1
+"""ERPNext docstatus of a submitted document; only these count as a match."""
+_DOCSTATUS_LABELS = {0: "draft", 2: "cancelled"}
+
+
+def is_eligible_order(order: ShopifyOrder, options: ReconcileOptions) -> bool:
+    since = options.as_of - timedelta(days=options.order_lookback_days)
+    return (
+        order.created_at >= since
+        and order.financial_status == "PAID"
+        and not order.cancelled
+        and not order.test
+    )
+
+
+def check_orders(
+    orders: Iterable[ShopifyOrder],
+    sales_orders: Iterable[ErpSalesOrder] | None,
+    options: ReconcileOptions,
+) -> Findings:
+    if sales_orders is None:
+        return Findings(
+            skipped=[SkippedCheck(check=CheckName.ORDER, key=None, reason=ORDER_CHECK_DISABLED)],
+            warnings=[ORDER_CHECK_DISABLED],
+        )
+    statuses: dict[str, set[int]] = {}
+    for sales_order in sales_orders:
+        order_id = (sales_order.shopify_order_id or "").strip()
+        if order_id:
+            statuses.setdefault(order_id, set()).add(sales_order.docstatus)
+
+    findings = Findings()
+    eligible = sorted(
+        (o for o in orders if is_eligible_order(o, options)), key=lambda o: o.created_at
+    )
+    for order in eligible:
+        found = statuses.get(order.order_id, set())
+        if SUBMITTED not in found:
+            findings.discrepancies.append(_order_not_in_erp(order.order_id, found))
+    return findings
+
+
+def _order_not_in_erp(order_id: str, docstatuses: set[int]) -> Discrepancy:
+    others = sorted(_DOCSTATUS_LABELS.get(status, f"docstatus {status}") for status in docstatuses)
+    detail = f"only {' and '.join(others)} Sales Order(s) found" if others else ""
+    return Discrepancy(
+        type=DiscrepancyType.ORDER_NOT_IN_ERP,
+        key=order_id,
+        source_of_truth=System.SHOPIFY,
+        suggested_action=(
+            "Create (or submit) the ERPNext Sales Order for this Shopify order and store "
+            "the order GID in the mapping field."
+        ),
+        detail=detail,
+    )
+
+
+# --- Everything together -------------------------------------------------------------------
+
+
+def reconcile(
+    shopify: ShopifyData, erp: ErpData, options: ReconcileOptions
+) -> ReconciliationResult:
+    """Run every rule. Raises ConfigurationError when currencies cannot be compared."""
+    validate_currencies(shopify.shop.currency, erp.price_list_currency, options.currency)
+
+    shopify_index = index_shopify_variants(shopify.variants)
+    erp_index = index_erp_items(erp.items, options)
+    matched = match_products(shopify_index, erp_index)
+
+    findings = Findings(discrepancies=check_sku_quality(shopify_index, erp_index))
+    findings.extend(
+        check_missing(shopify_index, erp_index, out_of_scope_reasons(erp.items, options))
+    )
+    findings.extend(check_prices(matched, erp.prices, shopify.shop, options))
+    findings.extend(
+        check_stock(
+            matched,
+            erp.bins,
+            options,
+            bins_trustworthy=erp.warehouse_confirmed and erp.bins_complete,
+        )
+    )
+    findings.extend(check_orders(shopify.orders, erp.sales_orders, options))
+
+    return ReconciliationResult(
+        generated_at=options.as_of,
+        shopify_fetched_at=shopify.fetched_at,
+        erpnext_fetched_at=erp.fetched_at,
+        discrepancies=tuple(findings.discrepancies),
+        skipped=tuple(findings.skipped),
+        warnings=tuple(findings.warnings),
+    )
+
+
+def _label(system: System) -> str:
+    return "Shopify" if system is System.SHOPIFY else "ERPNext"
