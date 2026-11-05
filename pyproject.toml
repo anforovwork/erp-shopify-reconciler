@@ -26,6 +26,7 @@ dev = ["pytest>=9,<10", "ruff==0.17.3", "pre-commit>=4,<5"]
 
 [project.scripts]
 reconcile = "reconciler.cli:main"
+reconcile-mcp = "reconciler.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
