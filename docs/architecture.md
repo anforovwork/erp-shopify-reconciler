@@ -1,8 +1,70 @@
 # Architecture
 
-_To be written once the data flow is implemented: sources → models → reconcile → report / MCP._
+## Overview
 
-## Shopify access (implemented)
+```mermaid
+flowchart LR
+    env[".env → Settings<br/>(SecretStr)"] --> clients
+    subgraph clients["sources/ (read-only)"]
+        shop["shopify.py"]
+        erp["erpnext.py"]
+    end
+    clients --> guard["ReadOnlyTransport<br/>sources/http.py"]
+    guard -- "POST GraphQL query" --> S[("Shopify<br/>Admin API")]
+    guard -- "GET /api/resource" --> E[("ERPNext<br/>REST API")]
+    shop --> sd["ShopifyData"]
+    erp --> ed["ErpData"]
+    sd --> rec["reconcile()<br/>pure, no network"]
+    ed --> rec
+    rec --> res["ReconciliationResult"]
+    res --> rep["report.py<br/>latest.md / latest.csv"]
+    res --> snap["snapshot.py<br/>snapshot-&lt;UTC&gt;.json"]
+    snap --> mcp["mcp_server.py<br/>stdio, read-only"]
+    mcp --> claude["Claude"]
+```
+
+1. **Settings** (`config.py`) — loaded from environment variables / `.env`; credentials are
+   `SecretStr`. Invalid or inconsistent settings stop the run with exit code 2.
+2. **Sources** (`sources/shopify.py`, `sources/erpnext.py`) — fetch everything the rules need, all
+   pages, through `ReadOnlyClient` (retries, back-off, timeouts, `Decimal` JSON). Any error or
+   incomplete response raises; partial data is never returned.
+3. **Models** (`models.py`) — pydantic records from each system (`ShopifyData`, `ErpData`) and the
+   output (`Discrepancy`, `ReconciliationResult`).
+4. **Reconcile** (`reconcile.py`) — pure functions that apply the v1 rules in CLAUDE.md and return
+   discrepancies, skipped checks and warnings. No network, so every rule is unit-tested.
+5. **Report and snapshot** (`report.py`, `snapshot.py`) — Markdown and CSV for people; a JSON
+   snapshot of the inputs and the result for the MCP server.
+6. **MCP server** (`mcp_server.py`) — answers Claude's questions from the newest snapshot only.
+
+## Read-only guard
+
+Every request from both clients passes through `ReadOnlyTransport` (`sources/http.py`), an httpx
+transport that runs a policy check **before** the request reaches the network. A rejected request
+raises `ReadOnlyViolation` and is never sent. The client is created with `follow_redirects=False`,
+and both policies reject any host other than the configured one.
+
+```
+client code ─► httpx.Client(follow_redirects=False)
+                 └─► ReadOnlyTransport.handle_request(request)
+                        ├─ policy(request)   ── violation ─► ReadOnlyViolation (nothing sent)
+                        └─ inner HTTPTransport ─► network
+```
+
+- **`erpnext_policy`** — only `GET`; no request body (Frappe reads a JSON body as parameters even on
+  `GET`); no method-override headers; no `;` in the query string; no `run_method`/`cmd` parameters
+  (Frappe would run a document method). The path is checked after URL decoding (no `..`, empty
+  segments, `;`, `\`, `%` or control characters) and must be `/api/resource/...` or a
+  `/api/method/...` call on the read-only allowlist (`frappe.auth.get_logged_user`).
+- **`shopify_policy`** — HTTPS only; `POST` only to `/admin/api/<version>/graphql.json`; no URL
+  parameters; an `application/json` body that is an object with only `query`, `variables` and
+  `operationName` and no duplicate keys. `ensure_query_only` parses the document with graphql-core
+  and accepts exactly one `query` operation plus fragments — mutations, subscriptions, several
+  operations, schema definitions and invalid syntax are rejected. The only other allowed request is
+  the token exchange described below.
+- **Credentials are a second layer.** Even if the guard had a gap, the Shopify app has read scopes
+  only and the ERPNext API user has a read-only role ([erpnext-readonly-user.md](erpnext-readonly-user.md)).
+
+## Shopify access and token flow
 
 ```
 .env: SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET (SecretStr)
@@ -40,7 +102,7 @@ ShopifyGraphQL ────── POST /admin/api/<v>/graphql.json ─► ReadOn
 - **Smoke test.** `scripts/shopify_smoke.py` runs the same path against the real store and prints
   only yes/no checks and counts.
 
-## `reconcile run` (implemented)
+## `reconcile run`
 
 ```
 load_settings(.env) ─► to_options(as_of = now, UTC)
@@ -61,7 +123,7 @@ reports/latest.md, latest.csv rendered from the result             (replaced ato
   it touches `latest.*`.
 - **Snapshot** (`snapshot.py`). It holds only pydantic models, never `Settings`, so it contains no
   credentials. Decimals are stored as JSON strings. `load_snapshot` validates it back into the
-  same models, so `reconcile report` (next task) can render it without the network.
+  same models, so the MCP server (and any later tooling) can use it without the network.
 - **Terminal output.** Only timestamps, counts per discrepancy type, skipped/warning counts
   and the output paths are printed. SKUs, order ids and warning text appear only in the escaped
   reports. Errors print as `ERROR: <type>: <message>` on stderr; client and config messages name
@@ -71,7 +133,7 @@ reports/latest.md, latest.csv rendered from the result             (replaced ato
 - **Files are private.** Reports and snapshots are created readable by the owner only (mode 0600)
   and are git-ignored (`reports/*`).
 
-## MCP server (implemented)
+## MCP server
 
 ```
 Claude ── stdio ──► reconcile-mcp (mcp_server.py) ──► reports/snapshot-<UTC>.json (newest)
