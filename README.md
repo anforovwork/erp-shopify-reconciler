@@ -50,6 +50,50 @@ reconcile run                    # or: reconcile run --report out/r.md --csv out
 echo $?                          # 0 = all agree, 1 = discrepancies found, 2 = error
 ```
 
+## Ask Claude (MCP server)
+
+`reconcile-mcp` is a read-only MCP server (stdio). Its three tools — `get_summary`,
+`list_discrepancies` and `explain_sku` — read the **newest snapshot** in `reports/` that
+`reconcile run` saved. They never contact Shopify or ERPNext and cannot change anything, so answers
+are only as fresh as the last run: every answer includes the snapshot time and its age. Run
+`reconcile run` again for current data.
+
+Replace `<you>` with your Ubuntu user name in the paths below.
+
+**Claude Code (in Ubuntu):**
+
+```bash
+claude mcp add reconciler -- \
+  /home/<you>/projects/erp-shopify-reconciler/.venv/bin/reconcile-mcp \
+  --reports-dir /home/<you>/projects/erp-shopify-reconciler/reports
+claude mcp list                  # should show: reconciler ... Connected
+```
+
+**Claude Desktop (Windows host, server runs in WSL):** open *Settings → Developer → Edit Config*
+(`%APPDATA%\Claude\claude_desktop_config.json`), add the server, then restart Claude Desktop.
+Check the distribution name with `wsl -l -v` in PowerShell.
+
+```json
+{
+  "mcpServers": {
+    "reconciler": {
+      "command": "wsl",
+      "args": [
+        "-d", "Ubuntu-24.04", "--",
+        "/home/<you>/projects/erp-shopify-reconciler/.venv/bin/reconcile-mcp",
+        "--reports-dir", "/home/<you>/projects/erp-shopify-reconciler/reports"
+      ]
+    }
+  }
+}
+```
+
+**Example questions:**
+
+- _"Which SKUs have a stock mismatch?"_
+- _"Summarise the last reconciliation. How old is the data?"_
+- _"Why is SKU FAKE-PRICE-1 flagged, and which system is right?"_
+
 ## How I built it
 
 _To be written: process (plan → Claude implements → I review the diff → tests → secret scan → merge),

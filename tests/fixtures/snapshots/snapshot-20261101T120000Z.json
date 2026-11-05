@@ -1,0 +1,293 @@
+{
+  "format_version": 1,
+  "options": {
+    "as_of": "2026-11-01T12:00:00Z",
+    "price_timezone": "America/Edmonton",
+    "item_groups": [
+      "Test Products"
+    ],
+    "price_list": "Test Selling",
+    "currency": "CAD",
+    "erp_prices_include_tax": false,
+    "warehouse": "Test Stores - TC",
+    "unit_uoms": [
+      "Nos"
+    ],
+    "order_lookback_days": 30
+  },
+  "shopify": {
+    "fetched_at": "2026-11-01T11:58:00Z",
+    "shop": {
+      "currency": "CAD",
+      "taxes_included": false
+    },
+    "variants": [
+      {
+        "variant_id": "gid://shopify/ProductVariant/1",
+        "sku": "FAKE-OK-1",
+        "price": "10.00",
+        "inventory_tracked": true,
+        "on_hand": 5
+      },
+      {
+        "variant_id": "gid://shopify/ProductVariant/2",
+        "sku": "FAKE-PRICE-1",
+        "price": "12.50",
+        "inventory_tracked": true,
+        "on_hand": 5
+      },
+      {
+        "variant_id": "gid://shopify/ProductVariant/3",
+        "sku": "FAKE-STOCK-1",
+        "price": "10.00",
+        "inventory_tracked": true,
+        "on_hand": 3
+      },
+      {
+        "variant_id": "gid://shopify/ProductVariant/4",
+        "sku": "FAKE-DUP-1",
+        "price": "10.00",
+        "inventory_tracked": true,
+        "on_hand": 5
+      },
+      {
+        "variant_id": "gid://shopify/ProductVariant/5",
+        "sku": "FAKE-DUP-1",
+        "price": "10.00",
+        "inventory_tracked": true,
+        "on_hand": 5
+      },
+      {
+        "variant_id": "gid://shopify/ProductVariant/6",
+        "sku": "FAKE-UNTRACKED-1",
+        "price": "10.00",
+        "inventory_tracked": false,
+        "on_hand": 5
+      },
+      {
+        "variant_id": "gid://shopify/ProductVariant/7",
+        "sku": "FAKE-SHOP-ONLY-1",
+        "price": "10.00",
+        "inventory_tracked": true,
+        "on_hand": 5
+      }
+    ],
+    "orders": [
+      {
+        "order_id": "gid://shopify/Order/1001",
+        "created_at": "2026-11-01T12:00:00Z",
+        "financial_status": "PAID",
+        "cancelled": false,
+        "test": false
+      }
+    ]
+  },
+  "erpnext": {
+    "fetched_at": "2026-11-01T11:59:00Z",
+    "price_list_currency": "CAD",
+    "items": [
+      {
+        "item_code": "FAKE-OK-1",
+        "item_group": "Test Products",
+        "stock_uom": "Nos",
+        "disabled": false,
+        "is_sales_item": true,
+        "is_stock_item": true,
+        "has_variants": false,
+        "variant_of": null
+      },
+      {
+        "item_code": "FAKE-PRICE-1",
+        "item_group": "Test Products",
+        "stock_uom": "Nos",
+        "disabled": false,
+        "is_sales_item": true,
+        "is_stock_item": true,
+        "has_variants": false,
+        "variant_of": null
+      },
+      {
+        "item_code": "FAKE-STOCK-1",
+        "item_group": "Test Products",
+        "stock_uom": "Nos",
+        "disabled": false,
+        "is_sales_item": true,
+        "is_stock_item": true,
+        "has_variants": false,
+        "variant_of": null
+      },
+      {
+        "item_code": "FAKE-DUP-1",
+        "item_group": "Test Products",
+        "stock_uom": "Nos",
+        "disabled": false,
+        "is_sales_item": true,
+        "is_stock_item": true,
+        "has_variants": false,
+        "variant_of": null
+      },
+      {
+        "item_code": "FAKE-UNTRACKED-1",
+        "item_group": "Test Products",
+        "stock_uom": "Nos",
+        "disabled": false,
+        "is_sales_item": true,
+        "is_stock_item": true,
+        "has_variants": false,
+        "variant_of": null
+      }
+    ],
+    "prices": [
+      {
+        "item_code": "FAKE-OK-1",
+        "price_list": "Test Selling",
+        "price_list_rate": "10.00",
+        "uom": "Nos",
+        "customer": null,
+        "supplier": null,
+        "batch_no": null,
+        "valid_from": null,
+        "valid_upto": null,
+        "packing_unit": 0
+      },
+      {
+        "item_code": "FAKE-PRICE-1",
+        "price_list": "Test Selling",
+        "price_list_rate": "10.00",
+        "uom": "Nos",
+        "customer": null,
+        "supplier": null,
+        "batch_no": null,
+        "valid_from": null,
+        "valid_upto": null,
+        "packing_unit": 0
+      },
+      {
+        "item_code": "FAKE-STOCK-1",
+        "price_list": "Test Selling",
+        "price_list_rate": "10.00",
+        "uom": "Nos",
+        "customer": null,
+        "supplier": null,
+        "batch_no": null,
+        "valid_from": null,
+        "valid_upto": null,
+        "packing_unit": 0
+      },
+      {
+        "item_code": "FAKE-DUP-1",
+        "price_list": "Test Selling",
+        "price_list_rate": "10.00",
+        "uom": "Nos",
+        "customer": null,
+        "supplier": null,
+        "batch_no": null,
+        "valid_from": null,
+        "valid_upto": null,
+        "packing_unit": 0
+      },
+      {
+        "item_code": "FAKE-UNTRACKED-1",
+        "price_list": "Test Selling",
+        "price_list_rate": "10.00",
+        "uom": "Nos",
+        "customer": null,
+        "supplier": null,
+        "batch_no": null,
+        "valid_from": null,
+        "valid_upto": null,
+        "packing_unit": 0
+      }
+    ],
+    "bins": [
+      {
+        "item_code": "FAKE-OK-1",
+        "warehouse": "Test Stores - TC",
+        "actual_qty": "5"
+      },
+      {
+        "item_code": "FAKE-PRICE-1",
+        "warehouse": "Test Stores - TC",
+        "actual_qty": "5"
+      },
+      {
+        "item_code": "FAKE-STOCK-1",
+        "warehouse": "Test Stores - TC",
+        "actual_qty": "5"
+      },
+      {
+        "item_code": "FAKE-DUP-1",
+        "warehouse": "Test Stores - TC",
+        "actual_qty": "5"
+      },
+      {
+        "item_code": "FAKE-UNTRACKED-1",
+        "warehouse": "Test Stores - TC",
+        "actual_qty": "5"
+      }
+    ],
+    "warehouse_confirmed": true,
+    "bins_complete": true,
+    "sales_orders": []
+  },
+  "result": {
+    "generated_at": "2026-11-01T12:00:00Z",
+    "shopify_fetched_at": "2026-11-01T11:58:00Z",
+    "erpnext_fetched_at": "2026-11-01T11:59:00Z",
+    "discrepancies": [
+      {
+        "type": "SKU_DUPLICATE",
+        "key": "FAKE-DUP-1",
+        "shopify_value": null,
+        "erp_value": null,
+        "source_of_truth": "erpnext",
+        "suggested_action": "Make this SKU unique in Shopify; other checks skip it until then.",
+        "detail": "appears 2 times in Shopify"
+      },
+      {
+        "type": "MISSING_IN_ERP",
+        "key": "FAKE-SHOP-ONLY-1",
+        "shopify_value": null,
+        "erp_value": null,
+        "source_of_truth": "erpnext",
+        "suggested_action": "No ERPNext item has this code: create the item, or correct the Shopify SKU.",
+        "detail": ""
+      },
+      {
+        "type": "PRICE_MISMATCH",
+        "key": "FAKE-PRICE-1",
+        "shopify_value": "12.50",
+        "erp_value": "10.00",
+        "source_of_truth": "erpnext",
+        "suggested_action": "Update the Shopify price to the ERPNext price.",
+        "detail": ""
+      },
+      {
+        "type": "STOCK_MISMATCH",
+        "key": "FAKE-STOCK-1",
+        "shopify_value": "3",
+        "erp_value": "5",
+        "source_of_truth": "erpnext",
+        "suggested_action": "Confirm the ERPNext warehouse count, then set Shopify on-hand inventory to match it.",
+        "detail": ""
+      },
+      {
+        "type": "ORDER_NOT_IN_ERP",
+        "key": "gid://shopify/Order/1001",
+        "shopify_value": null,
+        "erp_value": null,
+        "source_of_truth": "shopify",
+        "suggested_action": "Create (or submit) the ERPNext Sales Order for this Shopify order and store the order GID in the mapping field.",
+        "detail": ""
+      }
+    ],
+    "skipped": [
+      {
+        "check": "stock",
+        "key": "FAKE-UNTRACKED-1",
+        "reason": "Inventory is not tracked in Shopify for this variant."
+      }
+    ],
+    "warnings": []
+  }
+}

@@ -70,3 +70,27 @@ reports/latest.md, latest.csv rendered from the result             (replaced ato
   error, read-only violation or file error.
 - **Files are private.** Reports and snapshots are created readable by the owner only (mode 0600)
   and are git-ignored (`reports/*`).
+
+## MCP server (implemented)
+
+```
+Claude ── stdio ──► reconcile-mcp (mcp_server.py) ──► reports/snapshot-<UTC>.json (newest)
+                     get_summary / list_discrepancies / explain_sku
+```
+
+- **Snapshots only.** The server reads the newest `snapshot-YYYYMMDDTHHMMSSZ.json` in
+  `--reports-dir` (default `reports`) with `load_snapshot`. It imports nothing from `sources/` or
+  `config.py`, never loads `.env` and never starts a run (a test checks the imports). No snapshot →
+  the tool answers "Run `reconcile run` first". A damaged snapshot is named, its content is not echoed.
+- **Minimal output.** Explicit pydantic output models: type, category, key, both values (Decimal as
+  string), source of truth, suggested action, skipped-check reasons and snapshot timestamps/age.
+  The `detail` text and warning texts are not returned (warnings are counted).
+- **Untrusted data.** Keys come from the stores; the server instructions and every tool description
+  say to treat them as data, never instructions. All tools carry `readOnlyHint=true`,
+  `destructiveHint=false`, `openWorldHint=false`.
+- **Input checks.** `type` must be a known discrepancy type (case-insensitive; the error lists the
+  valid ones). `sku` is trimmed, 1–255 characters, no control or invisible formatting characters.
+  Rejected input is never echoed back. `list_discrepancies` returns at most 500 items
+  (`truncated` flag).
+- **SDK.** mcp 2.x (`mcp.server.mcpserver.MCPServer`; `FastMCP` no longer exists). Expected
+  failures raise `ToolError`, which the client receives as `is_error=true` with our message.
