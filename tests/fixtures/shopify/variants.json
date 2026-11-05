@@ -1,0 +1,16 @@
+{"nodes": [
+  {"id": "gid://shopify/ProductVariant/1", "sku": "TEST-SKU-1", "price": "19.99", "product": {"status": "ACTIVE"},
+   "inventoryItem": {"tracked": true, "inventoryLevel": {"quantities": [{"name": "on_hand", "quantity": 12}]}}},
+  {"id": "gid://shopify/ProductVariant/2", "sku": "TEST-SKU-2", "price": "15.00", "product": {"status": "ACTIVE"},
+   "inventoryItem": {"tracked": true, "inventoryLevel": null}},
+  {"id": "gid://shopify/ProductVariant/3", "sku": "TEST-SKU-4", "price": "9.95", "product": {"status": "ACTIVE"},
+   "inventoryItem": {"tracked": false, "inventoryLevel": {"quantities": [{"name": "on_hand", "quantity": 0}]}}},
+  {"id": "gid://shopify/ProductVariant/4", "sku": null, "price": "5.00", "product": {"status": "ACTIVE"},
+   "inventoryItem": {"tracked": true, "inventoryLevel": {"quantities": [{"name": "on_hand", "quantity": 1}]}}},
+  {"id": "gid://shopify/ProductVariant/5", "sku": "TEST-DRAFT-1", "price": "1.00", "product": {"status": "DRAFT"},
+   "inventoryItem": {"tracked": true, "inventoryLevel": {"quantities": [{"name": "on_hand", "quantity": 7}]}}},
+  {"id": "gid://shopify/ProductVariant/6", "sku": "TEST-ARCH-1", "price": "2.00", "product": {"status": "ARCHIVED"},
+   "inventoryItem": {"tracked": true, "inventoryLevel": null}},
+  {"id": "gid://shopify/ProductVariant/7", "sku": "TEST-SKU-3", "price": "25.00", "product": {"status": "ACTIVE"},
+   "inventoryItem": {"tracked": true, "inventoryLevel": {"quantities": [{"name": "on_hand", "quantity": 3}]}}}
+]}

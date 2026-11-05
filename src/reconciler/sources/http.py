@@ -48,6 +48,14 @@ class IncompleteResponse(SourceError):
     """A response was malformed or incomplete; partial data is never returned."""
 
 
+class ShopifyQueryError(SourceError):
+    """Shopify answered a query with GraphQL errors. `codes` are the sanitised error codes."""
+
+    def __init__(self, message: str, codes: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.codes = codes
+
+
 # --- Read-only guards ----------------------------------------------------------------------
 
 ERPNEXT_SAFE_METHODS = frozenset({"frappe.auth.get_logged_user"})
@@ -580,8 +588,10 @@ class ShopifyGraphQL:
                 retry.sleep(min(_throttle_wait(result, retry, attempt), retry.max_delay))
                 continue
             if errors:
-                codes = sorted({_error_code(e) for e in errors if isinstance(e, dict)})
-                raise SourceError(f"POST {self._path}: GraphQL errors {codes or ['UNKNOWN']}")
+                codes = sorted({_error_code(e) for e in errors if isinstance(e, dict)}) or [
+                    "UNKNOWN"
+                ]
+                raise ShopifyQueryError(f"POST {self._path}: GraphQL errors {codes}", tuple(codes))
             data = result.get("data")
             if not isinstance(data, dict):
                 raise IncompleteResponse(f"POST {self._path}: response has no data")
